@@ -14,7 +14,7 @@ on:
       bakasu_ref:
         description: 'BakaSU 分支或标签'
         required: false
-        default: 'weblate-main'
+        default: 'main'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
