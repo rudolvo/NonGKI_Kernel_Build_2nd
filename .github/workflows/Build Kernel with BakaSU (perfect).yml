@@ -114,9 +114,19 @@ jobs:
 
           echo "=== 使用 curl 方式集成 BakaSU (${{ github.event.inputs.bakasu_ref || 'main' }}) ==="
           curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/${{ github.event.inputs.bakasu_ref || 'main' }}/kernel/setup.sh" | bash
-
           
-          
+          echo "=== 用旧版 susfs_compat.mk 覆盖 main 分支的阻断版本 ==="
+          SUSFS_COMPAT_MK="drivers/kernelsu/tools/susfs_compat.mk"
+          if [ -f "$SUSFS_COMPAT_MK" ]; then
+          curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/e542359/kernel/tools/susfs_compat.mk" -o "$SUSFS_COMPAT_MK"
+          echo "✅ 已用 e542359 版本覆盖"
+          echo "检查是否还有 $(error):"
+          grep -n '\$(error' "$SUSFS_COMPAT_MK" || echo "✅ 已无 $(error) 阻断"
+          else
+          echo "::error::未找到 $SUSFS_COMPAT_MK"
+          exit 1
+          fi
+                   
           echo "=== 检查集成结果 ==="
           if [ -d "drivers/kernelsu" ]; then
             echo "✅ drivers/kernelsu 目录已存在"
