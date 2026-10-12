@@ -12,7 +12,7 @@ on:
           - star
           - mars
       bakasu_ref:
-        description: 'BakaSU 分支/标签/commit。main 当前被 SUSFS 阻断，建议填暂停前的 commit，例如 e542359'
+        description: 'BakaSU commit（暂停前版本）'
         required: false
         default: 'e542359'
 
@@ -31,6 +31,7 @@ env:
   CLANG_DIR: "${{ github.workspace }}/clang"
   CCACHE_DIR: "${{ github.workspace }}/.ccache"
   KERNEL_DIR: "${{ github.workspace }}/kernel"
+  BAKASU_REPO: "https://github.com/Baka-SU/BakaSU.git"
 
 jobs:
   build:
@@ -86,7 +87,25 @@ jobs:
           rm clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz
           ${{ env.CLANG_DIR }}/bin/clang --version
 
-      - name: Integrate BakaSU into Kernel (curl method)
+      - name: Clone BakaSU at specific commit
+        working-directory: kernel
+        run: |
+          BAKASU_REF="${{ github.event.inputs.bakasu_ref || 'e542359' }}"
+          echo "=== 克隆 BakaSU 并 checkout 到 $BAKASU_REF ==="
+          rm -rf BakaSU_src
+          git clone "${{ env.BAKASU_REPO }}" BakaSU_src
+          cd BakaSU_src
+          git checkout "$BAKASU_REF"
+          echo "当前 HEAD: $(git log --oneline -1)"
+          echo "验证 susfs_compat.mk 是否含有阻断:"
+          if grep -q '\$(error.*Please wait susfs update' kernel/tools/susfs_compat.mk; then
+            echo "::error::该 commit 依然包含 SUSFS 阻断，请换其他 commit"
+            exit 1
+          else
+            echo "✅ 该 commit 的 susfs_compat.mk 无阻断，可用"
+          fi
+
+      - name: Integrate BakaSU into Kernel (local setup.sh)
         working-directory: kernel
         run: |
           set -e
@@ -102,72 +121,45 @@ jobs:
           if [ ! -f "include/linux/seccomp_types.h" ]; then
             touch "include/linux/seccomp_types.h"
             echo "✅ 已创建空的 seccomp_types.h"
-          else
-            echo "ℹ️ seccomp_types.h 已存在，跳过"
           fi
 
           echo "=== 删除内核源码中自带的旧版 KernelSU/ReSukiSU 目录 ==="
-          rm -rf KernelSU
-          rm -rf drivers/kernelsu
-          rm -rf drivers/KernelSU
+          rm -rf KernelSU drivers/kernelsu drivers/KernelSU
           echo "✅ 旧版目录已清理干净"
 
-          BAKASU_REF="${{ github.event.inputs.bakasu_ref || 'e542359' }}"
-          echo "=== 使用 curl 方式集成 BakaSU (ref: $BAKASU_REF) ==="
-          curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/${BAKASU_REF}/kernel/setup.sh" | bash
-
-          echo "=== 检测 SUSFS 兼容性保护是否阻塞编译 ==="
-          SUSFS_COMPAT_MK="drivers/kernelsu/tools/susfs_compat.mk"
-          if [ -f "$SUSFS_COMPAT_MK" ] && grep -q '\$(error.*Please wait susfs update' "$SUSFS_COMPAT_MK"; then
-            echo "::error::检测到 SUSFS 适配尚未完成，BakaSU 官方已主动阻止编译。"
-            echo ""
-            echo "=========================================="
-            echo "  当前 bakasu_ref: $BAKASU_REF"
-            echo "  原因: KernelSU 已重构 selinux hide，SUSFS 尚未同步适配。"
-            echo ""
-            echo "  请尝试以下任一方案:"
-            echo "  1) 将 bakasu_ref 改为暂停前的 commit，例如: e542359 / c2ef226 / 61e2ce8"
-            echo "  2) 在旧 Actions 日志中搜索 'BakaSU cloned, latest commit:' 取短哈希"
-            echo "  3) 等待官方将适配合并到 main 后重新运行"
-            echo "=========================================="
-            echo ""
-            echo "当前 susfs_compat.mk 末尾内容:"
-            tail -15 "$SUSFS_COMPAT_MK"
+          echo "=== 使用本地 setup.sh 集成 BakaSU ==="
+          if [ ! -f "BakaSU_src/kernel/setup.sh" ]; then
+            echo "::error::未找到 BakaSU_src/kernel/setup.sh"
             exit 1
-          else
-            echo "✅ SUSFS 兼容性检查通过，可以继续编译"
           fi
+          echo "本地 setup.sh 路径: $(readlink -f BakaSU_src/kernel/setup.sh)"
+          echo "本地 BakaSU HEAD: $(cd BakaSU_src && git log --oneline -1)"
+          bash BakaSU_src/kernel/setup.sh
 
-          echo "=== 检查集成结果 ==="
+          echo "=== 再次验证驱动目录 ==="
           if [ -d "drivers/kernelsu" ]; then
             echo "✅ drivers/kernelsu 目录已存在"
             echo "软链接指向：$(readlink -f drivers/kernelsu)"
+            echo "susfs_compat.mk 检查:"
+            if [ -f "drivers/kernelsu/tools/susfs_compat.mk" ]; then
+              grep -c '\$(error' drivers/kernelsu/tools/susfs_compat.mk || echo "无 error 阻断"
+            fi
           else
-            echo "::error::集成失败，drivers/kernelsu 目录不存在"
+            echo "::error::集成失败"
             exit 1
           fi
 
-          echo "=== 修复 ksu_selinux_status_lock 未定义问题（在集成后执行） ==="
+          echo "=== 修复 ksu_selinux_status_lock 未定义问题 ==="
           KSU_SELINUX_FILE="drivers/kernelsu/selinux/selinux.c"
           if [ -f "$KSU_SELINUX_FILE" ]; then
             if ! grep -q "DEFINE_SPINLOCK(ksu_selinux_status_lock)" "$KSU_SELINUX_FILE"; then
               echo "DEFINE_SPINLOCK(ksu_selinux_status_lock);" >> "$KSU_SELINUX_FILE"
               echo "✅ 已添加 ksu_selinux_status_lock 定义"
-            else
-              echo "ℹ️ ksu_selinux_status_lock 已存在，跳过"
             fi
-          else
-            echo "⚠️ 未找到 $KSU_SELINUX_FILE，尝试查找其他位置"
-            find drivers/kernelsu -name "*.c" -exec grep -l "ksu_selinux_status_lock" {} \; | while read f; do
-              if ! grep -q "DEFINE_SPINLOCK(ksu_selinux_status_lock)" "$f"; then
-                echo "DEFINE_SPINLOCK(ksu_selinux_status_lock);" >> "$f"
-                echo "✅ 已在 $f 中添加定义"
-              fi
-            done
           fi
 
           echo "=== 导出 BakaSU 版本信息 ==="
-          echo "BAKASU_COMMIT=$(cd KernelSU && git rev-parse --short HEAD 2>/dev/null || echo 'unknown')" >> $GITHUB_ENV
+          echo "BAKASU_COMMIT=$(cd BakaSU_src && git rev-parse --short HEAD)" >> $GITHUB_ENV
           BAKASU_VERSION=$(grep -r "versionCode" drivers/kernelsu/ 2>/dev/null | head -n1 | awk -F= '{print $2}' | tr -d ' ;' || echo 'unknown')
           echo "BAKASU_VERSION=${BAKASU_VERSION}" >> $GITHUB_ENV
           echo "✅ BakaSU 提交: ${{ env.BAKASU_COMMIT }}"
@@ -183,57 +175,19 @@ jobs:
             echo "✅ 已修复 focaltech_3680 Makefile 缩进"
           fi
 
-          echo "=== 为 msm_minidump 子目录追加 -Wno-unused-variable ==="
-          MINIDUMP_MAKEFILE="drivers/soc/qcom/Makefile"
-          if [ -f "$MINIDUMP_MAKEFILE" ]; then
-            if ! grep -q "Wno-unused-variable" "$MINIDUMP_MAKEFILE"; then
-              echo "ccflags-y += -Wno-unused-variable" >> "$MINIDUMP_MAKEFILE"
-              echo "✅ 已为 drivers/soc/qcom Makefile 追加 -Wno-unused-variable"
-            else
-              echo "ℹ️ drivers/soc/qcom Makefile 已包含该选项，跳过"
+          echo "=== 子目录警告禁用 ==="
+          for entry in \
+            "drivers/soc/qcom/Makefile:-Wno-unused-variable" \
+            "drivers/thermal/Makefile:-Wno-fortify-source" \
+            "techpack/bootinfo/Makefile:-Wno-unused-result" \
+            "drivers/usb/dwc3/Makefile:-Wno-unused-label"; do
+            MK="${entry%:*}"
+            FLAG="${entry#*:}"
+            if [ -f "$MK" ] && ! grep -q "$FLAG" "$MK"; then
+              echo "ccflags-y += $FLAG" >> "$MK"
+              echo "✅ 已为 $MK 追加 $FLAG"
             fi
-          else
-            echo "ℹ️ 未找到 drivers/soc/qcom/Makefile，跳过"
-          fi
-
-          echo "=== 为 thermal 子目录追加 -Wno-fortify-source ==="
-          THERMAL_MAKEFILE="drivers/thermal/Makefile"
-          if [ -f "$THERMAL_MAKEFILE" ]; then
-            if ! grep -q "Wno-fortify-source" "$THERMAL_MAKEFILE"; then
-              echo "ccflags-y += -Wno-fortify-source" >> "$THERMAL_MAKEFILE"
-              echo "✅ 已为 drivers/thermal Makefile 追加 -Wno-fortify-source"
-            else
-              echo "ℹ️ drivers/thermal Makefile 已包含该选项，跳过"
-            fi
-          else
-            echo "ℹ️ 未找到 drivers/thermal/Makefile，跳过"
-          fi
-
-          echo "=== 为 bootinfo 子目录追加 -Wno-unused-result ==="
-          BOOTINFO_MAKEFILE="techpack/bootinfo/Makefile"
-          if [ -f "$BOOTINFO_MAKEFILE" ]; then
-            if ! grep -q "Wno-unused-result" "$BOOTINFO_MAKEFILE"; then
-              echo "ccflags-y += -Wno-unused-result" >> "$BOOTINFO_MAKEFILE"
-              echo "✅ 已为 techpack/bootinfo Makefile 追加 -Wno-unused-result"
-            else
-              echo "ℹ️ techpack/bootinfo Makefile 已包含该选项，跳过"
-            fi
-          else
-            echo "ℹ️ 未找到 techpack/bootinfo/Makefile，跳过"
-          fi
-
-          echo "=== 为 dwc3 子目录追加 -Wno-unused-label ==="
-          DWC3_MAKEFILE="drivers/usb/dwc3/Makefile"
-          if [ -f "$DWC3_MAKEFILE" ]; then
-            if ! grep -q "Wno-unused-label" "$DWC3_MAKEFILE"; then
-              echo "ccflags-y += -Wno-unused-label" >> "$DWC3_MAKEFILE"
-              echo "✅ 已为 drivers/usb/dwc3 Makefile 追加 -Wno-unused-label"
-            else
-              echo "ℹ️ drivers/usb/dwc3 Makefile 已包含该选项，跳过"
-            fi
-          else
-            echo "ℹ️ 未找到 drivers/usb/dwc3/Makefile，跳过"
-          fi
+          done
 
           echo "正在彻底清理残留文件..."
           rm -rf ${{ env.OUTPUT_DIR }}
@@ -243,14 +197,13 @@ jobs:
 
           echo "正在生成 out/.config ..."
           make -j$(nproc) O=${{ env.OUTPUT_DIR }} ${{ env.DEFCONFIG_NAME }}
-          
           if [ ! -f "${{ env.OUTPUT_DIR }}/.config" ]; then
-            echo "::error::make defconfig 失败，out/.config 不存在！"
+            echo "::error::make defconfig 失败"
             exit 1
           fi
           echo "✅ out/.config 生成成功"
 
-          echo "=== 启用 BakaSU 相关配置，并设置自定义 LOCALVERSION ==="
+          echo "=== 启用 BakaSU 相关配置 ==="
           scripts/config --file ${{ env.OUTPUT_DIR }}/.config \
             --enable KSU \
             --enable KSU_MANUAL_HOOK \
@@ -270,29 +223,14 @@ jobs:
             --set-val FRAME_WARN 131072 \
             --set-str LOCALVERSION "-edwin-star-260927-qgqi"
 
-          echo "=== 同步配置，避免构建时因 .config 不同步而进入交互模式 ==="
+          echo "=== 同步配置 ==="
           make O=${{ env.OUTPUT_DIR }} olddefconfig 2>&1 | tee olddefconfig.log
-          echo "✅ 配置已同步"
 
-          echo "=== 检查 KSU 配置是否生效 ==="
-          if grep -q "CONFIG_KSU=y" ${{ env.OUTPUT_DIR }}/.config; then
-            echo "✅ CONFIG_KSU 已启用"
-          else
-            echo "::error::CONFIG_KSU 未启用！"
+          if ! grep -q "CONFIG_KSU=y" ${{ env.OUTPUT_DIR }}/.config; then
+            echo "::error::CONFIG_KSU 未启用"
             exit 1
           fi
-
-          if grep -q "CONFIG_KSU_MANUAL_HOOK=y" ${{ env.OUTPUT_DIR }}/.config; then
-            echo "✅ CONFIG_KSU_MANUAL_HOOK 已启用"
-          fi
-
-          if grep -q 'CONFIG_LOCALVERSION="-edwin-star-260927-qgqi"' ${{ env.OUTPUT_DIR }}/.config; then
-            echo "✅ LOCALVERSION 已设置为 -edwin-star-260927-qgqi"
-          fi
-
-          if grep -q "CONFIG_FRAME_WARN=131072" ${{ env.OUTPUT_DIR }}/.config; then
-            echo "✅ FRAME_WARN 已放宽至 131072"
-          fi
+          echo "✅ 配置检查通过"
 
       - name: Build Kernel
         working-directory: kernel
@@ -306,8 +244,7 @@ jobs:
           export LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- \
                  CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
-          echo "=== 开始编译内核（实时输出，显示所有警告，全速执行） ==="
-          echo "=== 栈帧警告限制已放宽为 131072 ==="
+          echo "=== 开始编译内核 ==="
 
           MEM_GB=$(free -g | awk '/^Mem:/{print $2}')
           if [ "$MEM_GB" -lt 8 ]; then
@@ -335,9 +272,6 @@ jobs:
 
           echo "✅ 编译成功，Image 已生成"
 
-      # ============================================================
-      # 4. 打包 AnyKernel3
-      # ============================================================
       - name: Package AnyKernel3
         id: package
         run: |
@@ -355,8 +289,6 @@ jobs:
           #!/sbin/sh
 
           ### AnyKernel3 Flashable Kernel Script
-          ## Adapted for Xiaomi Mi 11 Ultra (star) with BakaSU
-
           properties() { '
           kernel.string=5.4.302-edwin-star-260927-qgqi+ BakaSU for Xiaomi 11 Ultra
           do.devicecheck=1
@@ -374,36 +306,25 @@ jobs:
           supported.vendorpatchlevels=
           '; } # end properties
 
-          # boot shell variables
           BLOCK=boot;
           IS_SLOT_DEVICE=1;
           RAMDISK_COMPRESSION=auto;
           PATCH_VBMETA_FLAG=auto;
 
-          # import functions/variables and setup patching - do not remove
           . tools/ak3-core.sh;
 
-          # pure kernel swap: keep the existing ramdisk and repack with the new Image.gz
           split_boot;
           flash_boot;
           AK3EOF
           
           chmod +x "$AK3_DIR/anykernel.sh"
-          echo "=== 生成的 anykernel.sh ==="
-          cat "$AK3_DIR/anykernel.sh"
           
           cd $AK3_DIR
           zip -r9 "../${{ env.DEVICE_CODENAME }}-BakaSU-${TIME}.zip" ./*
           
           sha256sum "../${{ env.DEVICE_CODENAME }}-BakaSU-${TIME}.zip" > "../SHA256SUMS.txt"
-          echo "=== SHA256 校验值 ==="
           cat ../SHA256SUMS.txt
 
-          echo "zip_name=${{ env.DEVICE_CODENAME }}-BakaSU-${TIME}.zip" >> $GITHUB_OUTPUT
-
-      # ============================================================
-      # 5. 上传
-      # ============================================================
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -429,27 +350,14 @@ jobs:
           body: |
             ## 测试内核 - BakaSU 集成版
 
-            ### 内核信息
             - 内核版本：5.4.302
             - 编译工具链：Clang 17.0.6 + LLD 17.0.6
             - LOCALVERSION：`-edwin-star-260927-qgqi`
-            - BakaSU 提交：${{ env.BAKASU_COMMIT }}
+            - BakaSU commit：${{ env.BAKASU_COMMIT }}
             - BakaSU 版本：${{ env.BAKASU_VERSION }}
-            - 集成 BakaSU ref：${{ github.event.inputs.bakasu_ref || 'e542359' }}
-
-            ### 特性
-            - KSU_MANUAL_HOOK + SUSFS v2.3.0 全套隐藏功能
-            - Backport BPF（源自 Kernel 5.10）
-            - 启用 LTO (ThinLTO)
-            - 启用 f2fs 文件系统优化
-
-            ### 兼容性
-            - 支持 HyperOS 4.0 / Android 17
-            - MIUI Android 13 及以上测试正常
 
             ### 刷机提示
             - 刷机有风险，请务必先备份原 boot 分区
-            - 首次刷机后建议重启两次，让 SUSFS 初始化完成
           files: |
             ${{ env.DEVICE_CODENAME }}-BakaSU-*.zip
             SHA256SUMS.txt
