@@ -12,9 +12,9 @@ on:
           - star
           - mars
       bakasu_ref:
-        description: 'BakaSU 分支或标签'
+        description: 'BakaSU 分支/标签/commit。main 当前被 SUSFS 阻断，建议填暂停前的 commit，例如 e542359'
         required: false
-        default: 'main'
+        default: 'e542359'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -112,21 +112,32 @@ jobs:
           rm -rf drivers/KernelSU
           echo "✅ 旧版目录已清理干净"
 
-          echo "=== 使用 curl 方式集成 BakaSU (${{ github.event.inputs.bakasu_ref || 'main' }}) ==="
-          curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/${{ github.event.inputs.bakasu_ref || 'main' }}/kernel/setup.sh" | bash
-          
-          echo "=== 用旧版 susfs_compat.mk 覆盖 main 分支的阻断版本 ==="
+          BAKASU_REF="${{ github.event.inputs.bakasu_ref || 'e542359' }}"
+          echo "=== 使用 curl 方式集成 BakaSU (ref: $BAKASU_REF) ==="
+          curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/${BAKASU_REF}/kernel/setup.sh" | bash
+
+          echo "=== 检测 SUSFS 兼容性保护是否阻塞编译 ==="
           SUSFS_COMPAT_MK="drivers/kernelsu/tools/susfs_compat.mk"
-          if [ -f "$SUSFS_COMPAT_MK" ]; then
-          curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/e542359/kernel/tools/susfs_compat.mk" -o "$SUSFS_COMPAT_MK"
-          echo "✅ 已用 e542359 版本覆盖"
-          echo "检查是否还有 $(error):"
-          grep -n '\$(error' "$SUSFS_COMPAT_MK" || echo "✅ 已无 $(error) 阻断"
+          if [ -f "$SUSFS_COMPAT_MK" ] && grep -q '\$(error.*Please wait susfs update' "$SUSFS_COMPAT_MK"; then
+            echo "::error::检测到 SUSFS 适配尚未完成，BakaSU 官方已主动阻止编译。"
+            echo ""
+            echo "=========================================="
+            echo "  当前 bakasu_ref: $BAKASU_REF"
+            echo "  原因: KernelSU 已重构 selinux hide，SUSFS 尚未同步适配。"
+            echo ""
+            echo "  请尝试以下任一方案:"
+            echo "  1) 将 bakasu_ref 改为暂停前的 commit，例如: e542359 / c2ef226 / 61e2ce8"
+            echo "  2) 在旧 Actions 日志中搜索 'BakaSU cloned, latest commit:' 取短哈希"
+            echo "  3) 等待官方将适配合并到 main 后重新运行"
+            echo "=========================================="
+            echo ""
+            echo "当前 susfs_compat.mk 末尾内容:"
+            tail -15 "$SUSFS_COMPAT_MK"
+            exit 1
           else
-          echo "::error::未找到 $SUSFS_COMPAT_MK"
-          exit 1
+            echo "✅ SUSFS 兼容性检查通过，可以继续编译"
           fi
-                   
+
           echo "=== 检查集成结果 ==="
           if [ -d "drivers/kernelsu" ]; then
             echo "✅ drivers/kernelsu 目录已存在"
@@ -414,7 +425,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: bakasu_${{ github.run_number }}
-          name: "BakaSU Kernel (LLVM 17.0.6, main branch)"
+          name: "BakaSU Kernel (LLVM 17.0.6)"
           body: |
             ## 测试内核 - BakaSU 集成版
 
@@ -424,9 +435,9 @@ jobs:
             - LOCALVERSION：`-edwin-star-260927-qgqi`
             - BakaSU 提交：${{ env.BAKASU_COMMIT }}
             - BakaSU 版本：${{ env.BAKASU_VERSION }}
+            - 集成 BakaSU ref：${{ github.event.inputs.bakasu_ref || 'e542359' }}
 
             ### 特性
-            - BakaSU main 分支最新代码
             - KSU_MANUAL_HOOK + SUSFS v2.3.0 全套隐藏功能
             - Backport BPF（源自 Kernel 5.10）
             - 启用 LTO (ThinLTO)
