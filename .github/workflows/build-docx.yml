@@ -22,7 +22,7 @@ jobs:
 
       - name: Run docx builder
         run: |
-          python scripts/build_docx.py
+          python scripts/enerate_paper.py
           ls -lh 论文_排版.docx
 
       - name: Upload DOCX artifact
