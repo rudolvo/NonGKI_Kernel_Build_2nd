@@ -23,10 +23,10 @@ jobs:
       - name: Run docx builder
         run: |
           python scripts/generate_paper.py
-          ls -lh 论文_排版.docx
+          ls -lh "侨都乐学，幸福同行：侨乡终身教育体系建设.docx"
 
       - name: Upload DOCX artifact
         uses: actions/upload-artifact@v4
         with:
           name: paper-docx
-          path: 论文_排版.docx
+          path: "侨都乐学，幸福同行：侨乡终身教育体系建设.docx"
