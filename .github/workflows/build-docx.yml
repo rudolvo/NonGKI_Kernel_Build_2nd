@@ -1,0 +1,32 @@
+name: Build DOCX from Python script
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install python-docx
+        run: |
+          python -m pip install --upgrade pip
+          pip install python-docx
+
+      - name: Run docx builder
+        run: |
+          python scripts/build_docx.py
+          ls -lh 论文_排版.docx
+
+      - name: Upload DOCX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: paper-docx
+          path: 论文_排版.docx
