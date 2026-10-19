@@ -99,7 +99,6 @@ jobs:
           echo "当前 HEAD: $(git log --oneline -1)"
 
           echo "=== 定位 susfs_compat.mk ==="
-          echo "当前工作目录: $(pwd)"
           MAP=$(find . -name 'susfs_compat.mk' -type f 2>/dev/null)
           if [ -z "$MAP" ]; then
             echo "ℹ️ 未找到任何 susfs_compat.mk，跳过注释"
@@ -109,37 +108,56 @@ jobs:
             while IFS= read -r f; do
               [ -z "$f" ] && continue
               echo "--- 处理 $f ---"
-              echo "  处理前:"
-              grep -n 'Please wait susfs update' "$f" || echo "  （无阻断行）"
               sed -i '/Please wait susfs update/ s/^\([^#]\)/# \1/' "$f"
-              echo "  处理后:"
-              grep -n 'Please wait susfs update' "$f" || echo "  （已全部注释）"
+              echo "  ✅ 已处理"
             done <<< "$MAP"
           fi
 
           echo "=== 最终验证（仅警告，不阻断编译） ==="
           if grep -rq '^[[:space:]]*[^#].*Please wait susfs update' --include='susfs_compat.mk' . 2>/dev/null; then
-            echo "::warning::仍有未注释的 SUSFS 阻断行，但继续编译（请关注 upstream 兼容性）"
-            grep -rn '^[[:space:]]*[^#].*Please wait susfs update' --include='susfs_compat.mk' . || true
+            echo "::warning::仍有未注释的 SUSFS 阻断行，但继续编译"
           else
             echo "✅ 所有 SUSFS 阻断已清除（或原本就不存在）"
           fi
 
-          echo "=== 在 BakaSU 源码中定义 fake_state (修复 selinux_hide 链接错误) ==="
-          SELINUX_HIDE_FILE="kernel/selinux/selinux_hide.c"
-          if [ -f "$SELINUX_HIDE_FILE" ]; then
-            if ! grep -q "struct selinux_state fake_state;" "$SELINUX_HIDE_FILE"; then
-              # 确保先包含必要的头文件
-              if ! grep -q "#include <linux/selinux.h>" "$SELINUX_HIDE_FILE"; then
-                sed -i '1i #include <linux/selinux.h>' "$SELINUX_HIDE_FILE"
+          echo "=== 修补 selinux_hide.c：确保 fake_state 为全局符号 ==="
+          HIDE_FILE="kernel/selinux/selinux_hide.c"
+          if [ -f "$HIDE_FILE" ]; then
+            # 1. 如果存在 static struct selinux_state fake_state，将其改为非 static
+            if grep -q "static struct selinux_state fake_state;" "$HIDE_FILE"; then
+              sed -i 's/static struct selinux_state fake_state;/struct selinux_state fake_state;/' "$HIDE_FILE"
+              echo "✅ 已将 fake_state 从 static 改为全局符号"
+            fi
+
+            # 2. 如果完全没有 fake_state 定义，则追加一个全局定义（并包含必要的头文件）
+            if ! grep -q "struct selinux_state fake_state;" "$HIDE_FILE"; then
+              # 确保包含 selinux.h，否则 struct selinux_state 可能未定义
+              if ! grep -q "#include <linux/selinux.h>" "$HIDE_FILE"; then
+                sed -i '1i #include <linux/selinux.h>' "$HIDE_FILE"
               fi
-              echo "struct selinux_state fake_state;" >> "$SELINUX_HIDE_FILE"
-              echo "✅ 已在 $SELINUX_HIDE_FILE 中添加 fake_state 定义"
+              echo "" >> "$HIDE_FILE"
+              echo "/* BakaSU non-GKI fix: 强制提供全局 fake_state 符号 */" >> "$HIDE_FILE"
+              echo "struct selinux_state fake_state;" >> "$HIDE_FILE"
+              echo "EXPORT_SYMBOL(fake_state);" >> "$HIDE_FILE"
+              echo "✅ 已追加全局 fake_state 定义并 EXPORT_SYMBOL"
             else
-              echo "ℹ️ $SELINUX_HIDE_FILE 已包含 fake_state 定义"
+              # 如果已有全局定义，确保它被 EXPORT
+              if ! grep -q "EXPORT_SYMBOL(fake_state);" "$HIDE_FILE"; then
+                echo "" >> "$HIDE_FILE"
+                echo "EXPORT_SYMBOL(fake_state);" >> "$HIDE_FILE"
+                echo "✅ 已为 fake_state 追加 EXPORT_SYMBOL"
+              else
+                echo "ℹ️ fake_state 已是全局符号且已导出"
+              fi
+            fi
+
+            # 3. 如果内核本身缺少 struct selinux_state 的定义（罕见），补一个占位结构体
+            #    放在文件最前面，仅当编译报“dereferencing pointer to incomplete type”时才需要
+            if ! grep -q "struct selinux_state {" "$HIDE_FILE"; then
+              echo "ℹ️ 未检测到 selinux_state 结构体定义，暂不追加（若报 incomplete type 再启用）"
             fi
           else
-            echo "::warning::$SELINUX_HIDE_FILE 不存在，跳过"
+            echo "::warning::$HIDE_FILE 不存在，跳过 fake_state 修补"
           fi
 
       - name: Manual integrate BakaSU into Kernel
@@ -188,15 +206,6 @@ jobs:
           else
             echo "::error::集成失败，drivers/kernelsu 不完整"
             exit 1
-          fi
-
-          echo "=== 修复 ksu_selinux_status_lock ==="
-          KSU_SELINUX_FILE="drivers/kernelsu/selinux/selinux.c"
-          if [ -f "$KSU_SELINUX_FILE" ]; then
-            if ! grep -q "DEFINE_SPINLOCK(ksu_selinux_status_lock)" "$KSU_SELINUX_FILE"; then
-              echo "DEFINE_SPINLOCK(ksu_selinux_status_lock);" >> "$KSU_SELINUX_FILE"
-              echo "✅ 已添加 ksu_selinux_status_lock 定义"
-            fi
           fi
 
           echo "=== 导出 BakaSU 版本信息 ==="
