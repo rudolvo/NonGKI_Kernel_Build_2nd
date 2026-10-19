@@ -98,91 +98,84 @@ jobs:
           git checkout "$BAKASU_REF"
           echo "当前 HEAD: $(git log --oneline -1)"
 
-          # ---------- SUSFS 阻断注释（保留） ----------
+          # ---------- SUSFS 阻断注释 ----------
           echo "=== 处理 susfs_compat.mk ==="
           MAP=$(find . -name 'susfs_compat.mk' -type f 2>/dev/null)
-          if [ -z "$MAP" ]; then
-            echo "ℹ️ 未找到 susfs_compat.mk"
-          else
+          if [ -n "$MAP" ]; then
             while IFS= read -r f; do
               [ -z "$f" ] && continue
               sed -i '/Please wait susfs update/ s/^\([^#]\)/# \1/' "$f"
             done <<< "$MAP"
             echo "✅ susfs_compat.mk 已处理"
+          else
+            echo "ℹ️ 未找到 susfs_compat.mk"
           fi
 
-          # ---------- 定位 SELinux 目录与文件 ----------
-          echo "=== 定位 BakaSU SELinux 源码 ==="
-          SELINUX_DIR=$(find . -type d -name 'selinux' -path '*/kernel/*' | head -n1)
-          if [ -z "$SELINUX_DIR" ]; then
-            echo "::error::未找到 BakaSU 的 selinux 目录"
-            exit 1
-          fi
-          echo "SELinux 目录: $SELINUX_DIR"
-
-          HIDE_FILE=$(find "$SELINUX_DIR" -name 'selinux_hide.c' -type f | head -n1)
+          # ---------- 动态定位 selinux_hide.c ----------
+          echo "=== 动态定位 selinux_hide.c ==="
+          HIDE_FILE=$(find . -name 'selinux_hide.c' -type f | head -n1)
           if [ -z "$HIDE_FILE" ]; then
-            echo "::error::未找到 selinux_hide.c"
+            echo "::error::在整个仓库中未找到 selinux_hide.c"
+            echo "当前 kernel/ 目录结构："
+            find kernel -maxdepth 3 -type d | head -20
             exit 1
           fi
-          echo "selinux_hide.c: $HIDE_FILE"
+          HIDE_DIR=$(dirname "$HIDE_FILE")
+          echo "✅ 找到 selinux_hide.c: $HIDE_FILE"
+          echo "   所在目录: $HIDE_DIR"
 
-          # ---------- 强制修改 selinux_hide.c：无条件定义全局符号 ----------
+          # ---------- 强制注入全局符号定义 ----------
           echo "=== 强制注入全局符号定义到 selinux_hide.c ==="
-          # 1. 移除所有已有的 fake_state 定义（包括 static 和条件编译中的）
           sed -i '/struct selinux_state fake_state;/d' "$HIDE_FILE"
           sed -i '/static struct selinux_state fake_state;/d' "$HIDE_FILE"
-
-          # 2. 移除已有的 ksu_selinux_status_lock 定义（避免重复）
           sed -i '/DEFINE_SPINLOCK(ksu_selinux_status_lock);/d' "$HIDE_FILE"
           sed -i '/EXPORT_SYMBOL(ksu_selinux_status_lock);/d' "$HIDE_FILE"
           sed -i '/EXPORT_SYMBOL(fake_state);/d' "$HIDE_FILE"
 
-          # 3. 在文件末尾强制追加全局定义与导出
           cat >> "$HIDE_FILE" << 'EOF'
-
           /* === BakaSU non-GKI SELinux compatibility: forced global symbols === */
           #include <linux/selinux.h>
           #include <linux/spinlock.h>
           #include <linux/export.h>
-
+          
           struct selinux_state fake_state;
           EXPORT_SYMBOL(fake_state);
-
           DEFINE_SPINLOCK(ksu_selinux_status_lock);
           EXPORT_SYMBOL(ksu_selinux_status_lock);
           EOF
-          echo "✅ 已强制注入 fake_state 与 ksu_selinux_status_lock（全局+导出）"
+          echo "✅ 已强制注入 fake_state 与 ksu_selinux_status_lock"
 
           # ---------- 强制 Makefile 编译 selinux_hide.o ----------
           echo "=== 强制 selinux_hide.o 进入编译 ==="
-          SELINUX_MK="$SELINUX_DIR/Makefile"
+          SELINUX_MK="$HIDE_DIR/Makefile"
           if [ -f "$SELINUX_MK" ]; then
-            # 移除可能存在的条件编译行
             sed -i '/selinux_hide\.o/d' "$SELINUX_MK"
-            # 无条件追加
             echo "obj-y += selinux_hide.o" >> "$SELINUX_MK"
-            echo "✅ 已强制 obj-y += selinux_hide.o"
+            echo "✅ 已强制 obj-y += selinux_hide.o 到 $SELINUX_MK"
           else
-            echo "::error::$SELINUX_MK 不存在"
-            exit 1
+            echo "::warning::$SELINUX_MK 不存在，尝试在其父目录 Makefile 中追加"
+            PARENT_MK="$HIDE_DIR/../Makefile"
+            if [ -f "$PARENT_MK" ]; then
+              echo "obj-y += $(basename "$HIDE_DIR")/selinux_hide.o" >> "$PARENT_MK"
+              echo "✅ 已在父目录 Makefile 中追加"
+            else
+              echo "::error::无法定位 Makefile，编译将失败"
+              exit 1
+            fi
           fi
-
-          # 如果存在 selinuxfs.c 且被引用，也强制编译（通常已包含在上一层 Makefile）
-          # 此处不重复添加，避免干扰
 
           # ---------- 最终验证 ----------
           echo "=== 最终验证：符号是否已就位 ==="
           if grep -q 'struct selinux_state fake_state;' "$HIDE_FILE" && \
              grep -q 'EXPORT_SYMBOL(fake_state);' "$HIDE_FILE" && \
-             grep -q 'DEFINE_SPINLOCK(ksu_selinux_status_lock);' "$HIDE_FILE" && \
-             grep -q 'obj-y += selinux_hide.o' "$SELINUX_MK"; then
+             grep -q 'DEFINE_SPINLOCK(ksu_selinux_status_lock);' "$HIDE_FILE"; then
             echo "✅ 所有修复已就位"
           else
-            echo "::error::修复不完整，请检查日志"
+            echo "::error::修复不完整"
             exit 1
           fi
 
+      # ---------- 后续步骤（Manual integrate、Build Kernel 等）保持不变 ----------
       - name: Manual integrate BakaSU into Kernel
         working-directory: kernel
         run: |
