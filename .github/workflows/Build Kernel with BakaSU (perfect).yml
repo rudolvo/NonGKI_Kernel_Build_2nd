@@ -87,7 +87,7 @@ jobs:
           rm clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz
           ${{ env.CLANG_DIR }}/bin/clang --version
 
-      - name: Clone BakaSU at specific commit
+      - name: Clone BakaSU and apply non-GKI SELinux fixes
         run: |
           cd ${{ env.KERNEL_DIR }}
           BAKASU_REF="${{ github.event.inputs.bakasu_ref || '896e898' }}"
@@ -98,66 +98,89 @@ jobs:
           git checkout "$BAKASU_REF"
           echo "当前 HEAD: $(git log --oneline -1)"
 
-          echo "=== 定位 susfs_compat.mk ==="
+          # ---------- SUSFS 阻断注释（保留） ----------
+          echo "=== 处理 susfs_compat.mk ==="
           MAP=$(find . -name 'susfs_compat.mk' -type f 2>/dev/null)
           if [ -z "$MAP" ]; then
-            echo "ℹ️ 未找到任何 susfs_compat.mk，跳过注释"
+            echo "ℹ️ 未找到 susfs_compat.mk"
           else
-            echo "找到的文件列表:"
-            echo "$MAP"
             while IFS= read -r f; do
               [ -z "$f" ] && continue
-              echo "--- 处理 $f ---"
               sed -i '/Please wait susfs update/ s/^\([^#]\)/# \1/' "$f"
-              echo "  ✅ 已处理"
             done <<< "$MAP"
+            echo "✅ susfs_compat.mk 已处理"
           fi
 
-          echo "=== 最终验证（仅警告，不阻断编译） ==="
-          if grep -rq '^[[:space:]]*[^#].*Please wait susfs update' --include='susfs_compat.mk' . 2>/dev/null; then
-            echo "::warning::仍有未注释的 SUSFS 阻断行，但继续编译"
+          # ---------- 定位 SELinux 目录与文件 ----------
+          echo "=== 定位 BakaSU SELinux 源码 ==="
+          SELINUX_DIR=$(find . -type d -name 'selinux' -path '*/kernel/*' | head -n1)
+          if [ -z "$SELINUX_DIR" ]; then
+            echo "::error::未找到 BakaSU 的 selinux 目录"
+            exit 1
+          fi
+          echo "SELinux 目录: $SELINUX_DIR"
+
+          HIDE_FILE=$(find "$SELINUX_DIR" -name 'selinux_hide.c' -type f | head -n1)
+          if [ -z "$HIDE_FILE" ]; then
+            echo "::error::未找到 selinux_hide.c"
+            exit 1
+          fi
+          echo "selinux_hide.c: $HIDE_FILE"
+
+          # ---------- 强制修改 selinux_hide.c：无条件定义全局符号 ----------
+          echo "=== 强制注入全局符号定义到 selinux_hide.c ==="
+          # 1. 移除所有已有的 fake_state 定义（包括 static 和条件编译中的）
+          sed -i '/struct selinux_state fake_state;/d' "$HIDE_FILE"
+          sed -i '/static struct selinux_state fake_state;/d' "$HIDE_FILE"
+
+          # 2. 移除已有的 ksu_selinux_status_lock 定义（避免重复）
+          sed -i '/DEFINE_SPINLOCK(ksu_selinux_status_lock);/d' "$HIDE_FILE"
+          sed -i '/EXPORT_SYMBOL(ksu_selinux_status_lock);/d' "$HIDE_FILE"
+          sed -i '/EXPORT_SYMBOL(fake_state);/d' "$HIDE_FILE"
+
+          # 3. 在文件末尾强制追加全局定义与导出
+          cat >> "$HIDE_FILE" << 'EOF'
+
+          /* === BakaSU non-GKI SELinux compatibility: forced global symbols === */
+          #include <linux/selinux.h>
+          #include <linux/spinlock.h>
+          #include <linux/export.h>
+
+          struct selinux_state fake_state;
+          EXPORT_SYMBOL(fake_state);
+
+          DEFINE_SPINLOCK(ksu_selinux_status_lock);
+          EXPORT_SYMBOL(ksu_selinux_status_lock);
+          EOF
+          echo "✅ 已强制注入 fake_state 与 ksu_selinux_status_lock（全局+导出）"
+
+          # ---------- 强制 Makefile 编译 selinux_hide.o ----------
+          echo "=== 强制 selinux_hide.o 进入编译 ==="
+          SELINUX_MK="$SELINUX_DIR/Makefile"
+          if [ -f "$SELINUX_MK" ]; then
+            # 移除可能存在的条件编译行
+            sed -i '/selinux_hide\.o/d' "$SELINUX_MK"
+            # 无条件追加
+            echo "obj-y += selinux_hide.o" >> "$SELINUX_MK"
+            echo "✅ 已强制 obj-y += selinux_hide.o"
           else
-            echo "✅ 所有 SUSFS 阻断已清除（或原本就不存在）"
+            echo "::error::$SELINUX_MK 不存在"
+            exit 1
           fi
 
-          echo "=== 修补 selinux_hide.c：确保 fake_state 为全局符号 ==="
-          HIDE_FILE="kernel/selinux/selinux_hide.c"
-          if [ -f "$HIDE_FILE" ]; then
-            # 1. 如果存在 static struct selinux_state fake_state，将其改为非 static
-            if grep -q "static struct selinux_state fake_state;" "$HIDE_FILE"; then
-              sed -i 's/static struct selinux_state fake_state;/struct selinux_state fake_state;/' "$HIDE_FILE"
-              echo "✅ 已将 fake_state 从 static 改为全局符号"
-            fi
+          # 如果存在 selinuxfs.c 且被引用，也强制编译（通常已包含在上一层 Makefile）
+          # 此处不重复添加，避免干扰
 
-            # 2. 如果完全没有 fake_state 定义，则追加一个全局定义（并包含必要的头文件）
-            if ! grep -q "struct selinux_state fake_state;" "$HIDE_FILE"; then
-              # 确保包含 selinux.h，否则 struct selinux_state 可能未定义
-              if ! grep -q "#include <linux/selinux.h>" "$HIDE_FILE"; then
-                sed -i '1i #include <linux/selinux.h>' "$HIDE_FILE"
-              fi
-              echo "" >> "$HIDE_FILE"
-              echo "/* BakaSU non-GKI fix: 强制提供全局 fake_state 符号 */" >> "$HIDE_FILE"
-              echo "struct selinux_state fake_state;" >> "$HIDE_FILE"
-              echo "EXPORT_SYMBOL(fake_state);" >> "$HIDE_FILE"
-              echo "✅ 已追加全局 fake_state 定义并 EXPORT_SYMBOL"
-            else
-              # 如果已有全局定义，确保它被 EXPORT
-              if ! grep -q "EXPORT_SYMBOL(fake_state);" "$HIDE_FILE"; then
-                echo "" >> "$HIDE_FILE"
-                echo "EXPORT_SYMBOL(fake_state);" >> "$HIDE_FILE"
-                echo "✅ 已为 fake_state 追加 EXPORT_SYMBOL"
-              else
-                echo "ℹ️ fake_state 已是全局符号且已导出"
-              fi
-            fi
-
-            # 3. 如果内核本身缺少 struct selinux_state 的定义（罕见），补一个占位结构体
-            #    放在文件最前面，仅当编译报“dereferencing pointer to incomplete type”时才需要
-            if ! grep -q "struct selinux_state {" "$HIDE_FILE"; then
-              echo "ℹ️ 未检测到 selinux_state 结构体定义，暂不追加（若报 incomplete type 再启用）"
-            fi
+          # ---------- 最终验证 ----------
+          echo "=== 最终验证：符号是否已就位 ==="
+          if grep -q 'struct selinux_state fake_state;' "$HIDE_FILE" && \
+             grep -q 'EXPORT_SYMBOL(fake_state);' "$HIDE_FILE" && \
+             grep -q 'DEFINE_SPINLOCK(ksu_selinux_status_lock);' "$HIDE_FILE" && \
+             grep -q 'obj-y += selinux_hide.o' "$SELINUX_MK"; then
+            echo "✅ 所有修复已就位"
           else
-            echo "::warning::$HIDE_FILE 不存在，跳过 fake_state 修补"
+            echo "::error::修复不完整，请检查日志"
+            exit 1
           fi
 
       - name: Manual integrate BakaSU into Kernel
@@ -175,36 +198,26 @@ jobs:
           echo "=== 手动创建 seccomp_types.h ==="
           if [ ! -f "include/linux/seccomp_types.h" ]; then
             touch "include/linux/seccomp_types.h"
-            echo "✅ 已创建"
           fi
 
           echo "=== 清理旧版 KernelSU/ReSukiSU ==="
           rm -rf KernelSU drivers/kernelsu drivers/KernelSU
 
-          echo "=== 手动集成 BakaSU (绕过 setup.sh 的 git 操作) ==="
+          echo "=== 手动集成 BakaSU ==="
           ln -sf ../BakaSU_src/kernel drivers/kernelsu
           echo "✅ 软链接: $(readlink -f drivers/kernelsu)"
 
           if ! grep -q "kernelsu" drivers/Makefile; then
             printf "\nobj-\$(CONFIG_KSU) += kernelsu/\n" >> drivers/Makefile
-            echo "✅ 已追加 obj-\$(CONFIG_KSU) += kernelsu/ 到 drivers/Makefile"
-          else
-            echo "ℹ️ drivers/Makefile 已包含 kernelsu"
           fi
 
           if ! grep -q 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig; then
             sed -i '/^endmenu/i\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
-            echo "✅ 已在 drivers/Kconfig 中插入 source 语句"
-          else
-            echo "ℹ️ drivers/Kconfig 已包含 source 语句"
           fi
 
           echo "=== 验证集成 ==="
-          if [ -f "drivers/kernelsu/Kconfig" ] && [ -f "drivers/kernelsu/Makefile" ]; then
-            echo "✅ drivers/kernelsu 内容:"
-            ls -la drivers/kernelsu/ | head -10
-          else
-            echo "::error::集成失败，drivers/kernelsu 不完整"
+          if [ ! -f "drivers/kernelsu/Kconfig" ] || [ ! -f "drivers/kernelsu/Makefile" ]; then
+            echo "::error::集成失败"
             exit 1
           fi
 
@@ -213,14 +226,13 @@ jobs:
           BAKASU_VERSION=$(grep -r "versionCode" drivers/kernelsu/ 2>/dev/null | head -n1 | awk -F= '{print $2}' | tr -d ' ;' || echo 'unknown')
           echo "BAKASU_VERSION=${BAKASU_VERSION}" >> $GITHUB_ENV
 
-          echo "正在清空 ccache..."
+          echo "=== 清理 ccache ==="
           ccache -C
 
           echo "=== 修复 focaltech_3680 Makefile ==="
           FOCALTECH_MAKEFILE="drivers/input/touchscreen/focaltech_3680/Makefile"
           if [ -f "$FOCALTECH_MAKEFILE" ]; then
             sed -i 's/^ \+/\t/' "$FOCALTECH_MAKEFILE"
-            echo "✅ 已修复缩进"
           fi
 
           echo "=== 子目录警告禁用 ==="
@@ -233,7 +245,6 @@ jobs:
             FLAG="${entry#*:}"
             if [ -f "$MK" ] && ! grep -q "$FLAG" "$MK"; then
               echo "ccflags-y += $FLAG" >> "$MK"
-              echo "✅ 已为 $MK 追加 $FLAG"
             fi
           done
 
