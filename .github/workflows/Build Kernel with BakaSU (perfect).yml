@@ -14,7 +14,7 @@ on:
       bakasu_ref:
         description: 'BakaSU commit（暂停前版本）'
         required: false
-        default: 'e542359'
+        default: 'main'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
