@@ -121,33 +121,27 @@ jobs:
           HIDE_DIR=$(dirname "$HIDE_FILE")
           echo "✅ 找到 selinux_hide.c: $HIDE_FILE"
 
-          # ---------- 关键修复 1：清理错误包含，恢复官方兼容层 ----------
+          # ---------- 清理错误包含 ----------
           echo "=== 清理 selinux_hide.c 中的错误手动包含 ==="
           sed -i '/#include <linux\/selinux.h>/d' "$HIDE_FILE"
-          sed -i '/#include <linux\/spinlock.h>/d' "$HIDE_FILE"
-          sed -i '/#include <linux\/export.h>/d' "$HIDE_FILE"
           echo "✅ 已移除错误的手动包含"
 
-          # ---------- 关键修复 2：将 fake_state 提升为强符号并导出 ----------
+          # ---------- 提升 fake_state 为强符号并导出 ----------
           echo "=== 提升 fake_state 为强符号并导出 ==="
-          # 移除旧的 static 定义（如果存在）
           sed -i 's/^static struct selinux_state fake_state;/struct selinux_state fake_state;/' "$HIDE_FILE"
-          # 如果完全没有定义，追加一个全局定义
-          if ! grep -q 'struct selinux_state fake_state;' "$HIDE_FILE"; then
+          if ! grep -q '^struct selinux_state fake_state;' "$HIDE_FILE"; then
             echo "" >> "$HIDE_FILE"
             echo "struct selinux_state fake_state;" >> "$HIDE_FILE"
           fi
-          # 确保导出
           if ! grep -q 'EXPORT_SYMBOL(fake_state);' "$HIDE_FILE"; then
             echo "EXPORT_SYMBOL(fake_state);" >> "$HIDE_FILE"
           fi
           echo "✅ fake_state 已处理"
 
-          # ---------- 关键修复 3：确保 ksu_selinux_status_lock 被定义并导出 ----------
+          # ---------- 处理 ksu_selinux_status_lock ----------
           echo "=== 处理 ksu_selinux_status_lock ==="
           if ! grep -q 'DEFINE_SPINLOCK(ksu_selinux_status_lock);' "$HIDE_FILE"; then
             echo "" >> "$HIDE_FILE"
-            echo "#include <linux/spinlock.h>" >> "$HIDE_FILE"
             echo "DEFINE_SPINLOCK(ksu_selinux_status_lock);" >> "$HIDE_FILE"
           fi
           if ! grep -q 'EXPORT_SYMBOL(ksu_selinux_status_lock);' "$HIDE_FILE"; then
@@ -155,22 +149,20 @@ jobs:
           fi
           echo "✅ ksu_selinux_status_lock 已处理"
 
-          # ---------- 关键修复 4：在 Makefile 中注入官方兼容检测逻辑 ----------
+          # ---------- 在 Makefile 中注入兼容检测（用 printf，避免 heredoc 缩进问题）----------
           echo "=== 在 Makefile 中注入 SELinux 兼容检测 ==="
           SELINUX_MK="$HIDE_DIR/Makefile"
           if [ -f "$SELINUX_MK" ]; then
-            # 移除之前可能添加的强制编译行
             sed -i '/selinux_hide\.o/d' "$SELINUX_MK"
-            # 注入与上游一致的检测逻辑
-            cat >> "$SELINUX_MK" << 'MKEOF'
-
-            # === BakaSU non-GKI compatibility: detect selinux_state ===
-            ifeq ($(shell grep -q "struct selinux_state " $(srctree)/security/selinux/include/security.h; echo $$?),0)
-            ccflags-y += -DKSU_COMPAT_HAS_SELINUX_STATE
-            endif
-
-            obj-y += selinux_hide.o
-            MKEOF
+            printf '%s\n' \
+              '' \
+              '# === BakaSU non-GKI compatibility: detect selinux_state ===' \
+              'ifeq ($(shell grep -q "struct selinux_state " $(srctree)/security/selinux/include/security.h; echo $$?),0)' \
+              'ccflags-y += -DKSU_COMPAT_HAS_SELINUX_STATE' \
+              'endif' \
+              '' \
+              'obj-y += selinux_hide.o' \
+              >> "$SELINUX_MK"
             echo "✅ 已在 $SELINUX_MK 中注入兼容检测与编译规则"
           else
             echo "::error::$SELINUX_MK 不存在，无法注入 Makefile"
@@ -341,33 +333,33 @@ jobs:
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git $AK3_DIR
           gzip -9 -c "$IMG_PATH" > "$AK3_DIR/Image.gz"
           
-          cat > "$AK3_DIR/anykernel.sh" << 'AK3EOF'
-          #!/sbin/sh
-          properties() { '
-          kernel.string=5.4.302-edwin-star-260927-qgqi+ BakaSU for Xiaomi 11 Ultra
-          do.devicecheck=1
-          do.modules=0
-          do.systemless=0
-          do.cleanup=1
-          do.cleanuponabort=0
-          device.name1=star
-          device.name2=mars
-          device.name3=
-          device.name4=
-          device.name5=
-          supported.versions=
-          supported.patchlevels=
-          supported.vendorpatchlevels=
-          '; } # end properties
-
-          BLOCK=boot;
-          IS_SLOT_DEVICE=1;
-          RAMDISK_COMPRESSION=auto;
-          PATCH_VBMETA_FLAG=auto;
-          . tools/ak3-core.sh;
-          split_boot;
-          flash_boot;
-          AK3EOF
+          printf '%s\n' \
+            '#!/sbin/sh' \
+            "properties() { '" \
+            'kernel.string=5.4.302-edwin-star-260927-qgqi+ BakaSU for Xiaomi 11 Ultra' \
+            'do.devicecheck=1' \
+            'do.modules=0' \
+            'do.systemless=0' \
+            'do.cleanup=1' \
+            'do.cleanuponabort=0' \
+            'device.name1=star' \
+            'device.name2=mars' \
+            'device.name3=' \
+            'device.name4=' \
+            'device.name5=' \
+            'supported.versions=' \
+            'supported.patchlevels=' \
+            'supported.vendorpatchlevels=' \
+            "'; } # end properties" \
+            '' \
+            'BLOCK=boot;' \
+            'IS_SLOT_DEVICE=1;' \
+            'RAMDISK_COMPRESSION=auto;' \
+            'PATCH_VBMETA_FLAG=auto;' \
+            '. tools/ak3-core.sh;' \
+            'split_boot;' \
+            'flash_boot;' \
+            > "$AK3_DIR/anykernel.sh"
           
           chmod +x "$AK3_DIR/anykernel.sh"
           cd $AK3_DIR
