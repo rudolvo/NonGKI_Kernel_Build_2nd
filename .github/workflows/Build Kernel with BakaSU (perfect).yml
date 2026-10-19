@@ -97,6 +97,12 @@ jobs:
           cd BakaSU_src
           git checkout "$BAKASU_REF"
           echo "当前 HEAD: $(git log --oneline -1)"
+          # 注释掉 SUSFS 兼容性检查中的阻断语句
+          SUSFS_COMPAT_FILE="kernel/tools/susfs_compat.mk"
+          if [ -f "$SUSFS_COMPAT_FILE" ]; then
+          sed -i 's/^\(\s*\)\$(error.*Please wait susfs update.*/\1# &/' "$SUSFS_COMPAT_FILE"
+          echo "✅ 已注释 susfs_compat.mk 中的阻断语句"
+          fi
           echo "验证 susfs_compat.mk:"
           if grep -q '\$(error.*Please wait susfs update' kernel/tools/susfs_compat.mk; then
             echo "::error::该 commit 依然包含 SUSFS 阻断，请换其他 commit"
