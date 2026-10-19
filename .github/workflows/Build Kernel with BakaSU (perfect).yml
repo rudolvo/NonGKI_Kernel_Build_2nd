@@ -116,66 +116,79 @@ jobs:
           HIDE_FILE=$(find . -name 'selinux_hide.c' -type f | head -n1)
           if [ -z "$HIDE_FILE" ]; then
             echo "::error::在整个仓库中未找到 selinux_hide.c"
-            echo "当前 kernel/ 目录结构："
-            find kernel -maxdepth 3 -type d | head -20
             exit 1
           fi
           HIDE_DIR=$(dirname "$HIDE_FILE")
           echo "✅ 找到 selinux_hide.c: $HIDE_FILE"
-          echo "   所在目录: $HIDE_DIR"
 
-          # ---------- 强制注入全局符号定义 ----------
-          echo "=== 强制注入全局符号定义到 selinux_hide.c ==="
-          sed -i '/struct selinux_state fake_state;/d' "$HIDE_FILE"
-          sed -i '/static struct selinux_state fake_state;/d' "$HIDE_FILE"
-          sed -i '/DEFINE_SPINLOCK(ksu_selinux_status_lock);/d' "$HIDE_FILE"
-          sed -i '/EXPORT_SYMBOL(ksu_selinux_status_lock);/d' "$HIDE_FILE"
-          sed -i '/EXPORT_SYMBOL(fake_state);/d' "$HIDE_FILE"
+          # ---------- 关键修复 1：清理错误包含，恢复官方兼容层 ----------
+          echo "=== 清理 selinux_hide.c 中的错误手动包含 ==="
+          sed -i '/#include <linux\/selinux.h>/d' "$HIDE_FILE"
+          sed -i '/#include <linux\/spinlock.h>/d' "$HIDE_FILE"
+          sed -i '/#include <linux\/export.h>/d' "$HIDE_FILE"
+          echo "✅ 已移除错误的手动包含"
 
-          cat >> "$HIDE_FILE" << 'EOF'
-          /* === BakaSU non-GKI SELinux compatibility: forced global symbols === */
-          #include <linux/selinux.h>
-          #include <linux/spinlock.h>
-          #include <linux/export.h>
-          
-          struct selinux_state fake_state;
-          EXPORT_SYMBOL(fake_state);
-          DEFINE_SPINLOCK(ksu_selinux_status_lock);
-          EXPORT_SYMBOL(ksu_selinux_status_lock);
-          EOF
-          echo "✅ 已强制注入 fake_state 与 ksu_selinux_status_lock"
+          # ---------- 关键修复 2：将 fake_state 提升为强符号并导出 ----------
+          echo "=== 提升 fake_state 为强符号并导出 ==="
+          # 移除旧的 static 定义（如果存在）
+          sed -i 's/^static struct selinux_state fake_state;/struct selinux_state fake_state;/' "$HIDE_FILE"
+          # 如果完全没有定义，追加一个全局定义
+          if ! grep -q 'struct selinux_state fake_state;' "$HIDE_FILE"; then
+            echo "" >> "$HIDE_FILE"
+            echo "struct selinux_state fake_state;" >> "$HIDE_FILE"
+          fi
+          # 确保导出
+          if ! grep -q 'EXPORT_SYMBOL(fake_state);' "$HIDE_FILE"; then
+            echo "EXPORT_SYMBOL(fake_state);" >> "$HIDE_FILE"
+          fi
+          echo "✅ fake_state 已处理"
 
-          # ---------- 强制 Makefile 编译 selinux_hide.o ----------
-          echo "=== 强制 selinux_hide.o 进入编译 ==="
+          # ---------- 关键修复 3：确保 ksu_selinux_status_lock 被定义并导出 ----------
+          echo "=== 处理 ksu_selinux_status_lock ==="
+          if ! grep -q 'DEFINE_SPINLOCK(ksu_selinux_status_lock);' "$HIDE_FILE"; then
+            echo "" >> "$HIDE_FILE"
+            echo "#include <linux/spinlock.h>" >> "$HIDE_FILE"
+            echo "DEFINE_SPINLOCK(ksu_selinux_status_lock);" >> "$HIDE_FILE"
+          fi
+          if ! grep -q 'EXPORT_SYMBOL(ksu_selinux_status_lock);' "$HIDE_FILE"; then
+            echo "EXPORT_SYMBOL(ksu_selinux_status_lock);" >> "$HIDE_FILE"
+          fi
+          echo "✅ ksu_selinux_status_lock 已处理"
+
+          # ---------- 关键修复 4：在 Makefile 中注入官方兼容检测逻辑 ----------
+          echo "=== 在 Makefile 中注入 SELinux 兼容检测 ==="
           SELINUX_MK="$HIDE_DIR/Makefile"
           if [ -f "$SELINUX_MK" ]; then
+            # 移除之前可能添加的强制编译行
             sed -i '/selinux_hide\.o/d' "$SELINUX_MK"
-            echo "obj-y += selinux_hide.o" >> "$SELINUX_MK"
-            echo "✅ 已强制 obj-y += selinux_hide.o 到 $SELINUX_MK"
-          else
-            echo "::warning::$SELINUX_MK 不存在，尝试在其父目录 Makefile 中追加"
-            PARENT_MK="$HIDE_DIR/../Makefile"
-            if [ -f "$PARENT_MK" ]; then
-              echo "obj-y += $(basename "$HIDE_DIR")/selinux_hide.o" >> "$PARENT_MK"
-              echo "✅ 已在父目录 Makefile 中追加"
-            else
-              echo "::error::无法定位 Makefile，编译将失败"
-              exit 1
-            fi
-          fi
+            # 注入与上游一致的检测逻辑
+            cat >> "$SELINUX_MK" << 'MKEOF'
 
-          # ---------- 最终验证 ----------
-          echo "=== 最终验证：符号是否已就位 ==="
-          if grep -q 'struct selinux_state fake_state;' "$HIDE_FILE" && \
-             grep -q 'EXPORT_SYMBOL(fake_state);' "$HIDE_FILE" && \
-             grep -q 'DEFINE_SPINLOCK(ksu_selinux_status_lock);' "$HIDE_FILE"; then
-            echo "✅ 所有修复已就位"
+            # === BakaSU non-GKI compatibility: detect selinux_state ===
+            ifeq ($(shell grep -q "struct selinux_state " $(srctree)/security/selinux/include/security.h; echo $$?),0)
+            ccflags-y += -DKSU_COMPAT_HAS_SELINUX_STATE
+            endif
+
+            obj-y += selinux_hide.o
+            MKEOF
+            echo "✅ 已在 $SELINUX_MK 中注入兼容检测与编译规则"
           else
-            echo "::error::修复不完整"
+            echo "::error::$SELINUX_MK 不存在，无法注入 Makefile"
             exit 1
           fi
 
-      # ---------- 后续步骤（Manual integrate、Build Kernel 等）保持不变 ----------
+          # ---------- 最终验证 ----------
+          echo "=== 最终验证 ==="
+          if grep -q 'struct selinux_state fake_state;' "$HIDE_FILE" && \
+             grep -q 'EXPORT_SYMBOL(fake_state);' "$HIDE_FILE" && \
+             grep -q 'DEFINE_SPINLOCK(ksu_selinux_status_lock);' "$HIDE_FILE" && \
+             grep -q 'KSU_COMPAT_HAS_SELINUX_STATE' "$SELINUX_MK"; then
+            echo "✅ 所有修复已就位"
+          else
+            echo "::error::修复不完整，请检查日志"
+            exit 1
+          fi
+
       - name: Manual integrate BakaSU into Kernel
         working-directory: kernel
         run: |
