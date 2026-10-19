@@ -120,35 +120,46 @@ jobs:
           fi
           HIDE_DIR=$(dirname "$HIDE_FILE")
           echo "✅ 找到 selinux_hide.c: $HIDE_FILE"
-          echo "   所在目录: $HIDE_DIR"
 
-          # ---------- 清理错误包含 ----------
-          echo "=== 清理 selinux_hide.c 中的错误手动包含 ==="
+          # ---------- 清理错误包含与错误定义 ----------
+          echo "=== 清理之前错误添加的内容 ==="
           sed -i '/#include <linux\/selinux.h>/d' "$HIDE_FILE"
-          echo "✅ 已移除错误的手动包含"
+          sed -i '/DEFINE_SPINLOCK(ksu_selinux_status_lock);/d' "$HIDE_FILE"
+          sed -i '/EXPORT_SYMBOL(ksu_selinux_status_lock);/d' "$HIDE_FILE"
+          sed -i '/EXPORT_SYMBOL(fake_state);/d' "$HIDE_FILE"
+          echo "✅ 已清理"
 
-          # ---------- 提升 fake_state 为强符号并导出 ----------
-          echo "=== 提升 fake_state 为强符号并导出 ==="
-          sed -i 's/^static struct selinux_state fake_state;/struct selinux_state fake_state;/' "$HIDE_FILE"
-          if ! grep -q '^struct selinux_state fake_state;' "$HIDE_FILE"; then
-            echo "" >> "$HIDE_FILE"
-            echo "struct selinux_state fake_state;" >> "$HIDE_FILE"
-          fi
-          if ! grep -q 'EXPORT_SYMBOL(fake_state);' "$HIDE_FILE"; then
-            echo "EXPORT_SYMBOL(fake_state);" >> "$HIDE_FILE"
-          fi
-          echo "✅ fake_state 已处理"
-
-          # ---------- 处理 ksu_selinux_status_lock ----------
+          # ---------- 处理 ksu_selinux_status_lock：保持原类型，去掉 static ----------
           echo "=== 处理 ksu_selinux_status_lock ==="
-          if ! grep -q 'DEFINE_SPINLOCK(ksu_selinux_status_lock);' "$HIDE_FILE"; then
+          if grep -q 'static struct mutex \*ksu_selinux_status_lock' "$HIDE_FILE"; then
+            sed -i 's/^static struct mutex \*ksu_selinux_status_lock/struct mutex *ksu_selinux_status_lock/' "$HIDE_FILE"
+            echo "✅ 已将 static struct mutex * 改为全局"
+          elif ! grep -q 'ksu_selinux_status_lock' "$HIDE_FILE"; then
             echo "" >> "$HIDE_FILE"
-            echo "DEFINE_SPINLOCK(ksu_selinux_status_lock);" >> "$HIDE_FILE"
+            echo "struct mutex *ksu_selinux_status_lock = NULL;" >> "$HIDE_FILE"
+            echo "✅ 已追加 struct mutex * 定义"
+          else
+            echo "ℹ️ 已存在非 static 定义"
           fi
           if ! grep -q 'EXPORT_SYMBOL(ksu_selinux_status_lock);' "$HIDE_FILE"; then
             echo "EXPORT_SYMBOL(ksu_selinux_status_lock);" >> "$HIDE_FILE"
           fi
-          echo "✅ ksu_selinux_status_lock 已处理"
+
+          # ---------- 处理 fake_state：保持原类型，去掉 static ----------
+          echo "=== 处理 fake_state ==="
+          if grep -q 'static struct selinux_state fake_state;' "$HIDE_FILE"; then
+            sed -i 's/^static struct selinux_state fake_state;/struct selinux_state fake_state;/' "$HIDE_FILE"
+            echo "✅ 已将 static fake_state 改为全局"
+          elif ! grep -q 'struct selinux_state fake_state;' "$HIDE_FILE"; then
+            echo "" >> "$HIDE_FILE"
+            echo "struct selinux_state fake_state;" >> "$HIDE_FILE"
+            echo "✅ 已追加 fake_state 定义"
+          else
+            echo "ℹ️ 已存在非 static 定义"
+          fi
+          if ! grep -q 'EXPORT_SYMBOL(fake_state);' "$HIDE_FILE"; then
+            echo "EXPORT_SYMBOL(fake_state);" >> "$HIDE_FILE"
+          fi
 
           # ---------- 向上逐层查找存在的 Makefile ----------
           echo "=== 定位包含 selinux_hide 的 Makefile ==="
@@ -161,14 +172,12 @@ jobs:
             fi
             SEARCH_DIR=$(dirname "$SEARCH_DIR")
           done
-
           if [ -z "$SELINUX_MK" ]; then
             echo "::error::从 $HIDE_DIR 向上未找到任何 Makefile"
             exit 1
           fi
           echo "✅ 使用 Makefile: $SELINUX_MK"
 
-          # 计算 HIDE_FILE 相对于 Makefile 目录的路径（用于 obj-y）
           MK_DIR=$(dirname "$SELINUX_MK")
           HIDE_REL=$(realpath --relative-to="$MK_DIR" "$HIDE_FILE")
           HIDE_OBJ="${HIDE_REL%.c}.o"
@@ -190,9 +199,10 @@ jobs:
 
           # ---------- 最终验证 ----------
           echo "=== 最终验证 ==="
-          if grep -q 'struct selinux_state fake_state;' "$HIDE_FILE" && \
+          if grep -q '^struct selinux_state fake_state;' "$HIDE_FILE" && \
              grep -q 'EXPORT_SYMBOL(fake_state);' "$HIDE_FILE" && \
-             grep -q 'DEFINE_SPINLOCK(ksu_selinux_status_lock);' "$HIDE_FILE" && \
+             grep -q '^struct mutex \*ksu_selinux_status_lock' "$HIDE_FILE" && \
+             grep -q 'EXPORT_SYMBOL(ksu_selinux_status_lock);' "$HIDE_FILE" && \
              grep -q 'KSU_COMPAT_HAS_SELINUX_STATE' "$SELINUX_MK" && \
              grep -q "obj-y += $HIDE_OBJ" "$SELINUX_MK"; then
             echo "✅ 所有修复已就位"
