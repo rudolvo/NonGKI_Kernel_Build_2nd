@@ -125,6 +125,23 @@ jobs:
             echo "✅ 所有 SUSFS 阻断已清除（或原本就不存在）"
           fi
 
+          echo "=== 在 BakaSU 源码中定义 fake_state (修复 selinux_hide 链接错误) ==="
+          SELINUX_HIDE_FILE="kernel/selinux/selinux_hide.c"
+          if [ -f "$SELINUX_HIDE_FILE" ]; then
+            if ! grep -q "struct selinux_state fake_state;" "$SELINUX_HIDE_FILE"; then
+              # 确保先包含必要的头文件
+              if ! grep -q "#include <linux/selinux.h>" "$SELINUX_HIDE_FILE"; then
+                sed -i '1i #include <linux/selinux.h>' "$SELINUX_HIDE_FILE"
+              fi
+              echo "struct selinux_state fake_state;" >> "$SELINUX_HIDE_FILE"
+              echo "✅ 已在 $SELINUX_HIDE_FILE 中添加 fake_state 定义"
+            else
+              echo "ℹ️ $SELINUX_HIDE_FILE 已包含 fake_state 定义"
+            fi
+          else
+            echo "::warning::$SELINUX_HIDE_FILE 不存在，跳过"
+          fi
+
       - name: Manual integrate BakaSU into Kernel
         working-directory: kernel
         run: |
@@ -147,11 +164,9 @@ jobs:
           rm -rf KernelSU drivers/kernelsu drivers/KernelSU
 
           echo "=== 手动集成 BakaSU (绕过 setup.sh 的 git 操作) ==="
-          # 1. 创建软链接
           ln -sf ../BakaSU_src/kernel drivers/kernelsu
           echo "✅ 软链接: $(readlink -f drivers/kernelsu)"
 
-          # 2. 修改 drivers/Makefile
           if ! grep -q "kernelsu" drivers/Makefile; then
             printf "\nobj-\$(CONFIG_KSU) += kernelsu/\n" >> drivers/Makefile
             echo "✅ 已追加 obj-\$(CONFIG_KSU) += kernelsu/ 到 drivers/Makefile"
@@ -159,7 +174,6 @@ jobs:
             echo "ℹ️ drivers/Makefile 已包含 kernelsu"
           fi
 
-          # 3. 修改 drivers/Kconfig
           if ! grep -q 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig; then
             sed -i '/^endmenu/i\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
             echo "✅ 已在 drivers/Kconfig 中插入 source 语句"
