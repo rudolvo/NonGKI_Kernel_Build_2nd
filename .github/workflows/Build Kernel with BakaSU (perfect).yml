@@ -87,7 +87,7 @@ jobs:
           rm clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz
           ${{ env.CLANG_DIR }}/bin/clang --version
 
-      - name: Clone BakaSU
+      - name: Clone BakaSU and apply non-GKI SELinux fixes
         run: |
           cd ${{ env.KERNEL_DIR }}
           BAKASU_REF="${{ github.event.inputs.bakasu_ref || '896e898' }}"
@@ -98,8 +98,8 @@ jobs:
           git checkout "$BAKASU_REF"
           echo "当前 HEAD: $(git log --oneline -1)"
 
-          # 仅处理 SUSFS 兼容性阻断，不再修改 selinux_hide.c
-          echo "=== 处理 susfs_compat.mk 阻断 ==="
+          # ---------- SUSFS 阻断注释 ----------
+          echo "=== 处理 susfs_compat.mk ==="
           MAP=$(find . -name 'susfs_compat.mk' -type f 2>/dev/null)
           if [ -n "$MAP" ]; then
             while IFS= read -r f; do
@@ -109,6 +109,76 @@ jobs:
             echo "✅ susfs_compat.mk 已处理"
           else
             echo "ℹ️ 未找到 susfs_compat.mk"
+          fi
+
+          # ---------- 强制导出 SELinux 符号（解决链接错误） ----------
+          echo "=== 强制导出 SELinux 符号 ==="
+          HIDE_FILE=$(find . -name 'selinux_hide.c' -type f | head -n1)
+          if [ -z "$HIDE_FILE" ]; then
+            echo "::error::未找到 selinux_hide.c"
+            exit 1
+          fi
+          HIDE_DIR=$(dirname "$HIDE_FILE")
+          echo "✅ 找到 selinux_hide.c: $HIDE_FILE"
+
+          # 1. fake_state 强制全局并导出
+          sed -i '/^static struct selinux_state fake_state;/d' "$HIDE_FILE"
+          if ! grep -q '^struct selinux_state fake_state;' "$HIDE_FILE"; then
+            echo "" >> "$HIDE_FILE"
+            echo "struct selinux_state fake_state;" >> "$HIDE_FILE"
+          fi
+          if ! grep -q 'EXPORT_SYMBOL(fake_state);' "$HIDE_FILE"; then
+            echo "EXPORT_SYMBOL(fake_state);" >> "$HIDE_FILE"
+          fi
+          echo "✅ fake_state 已强制全局并导出"
+
+          # 2. ksu_selinux_status_lock 强制全局并导出（保持原 mutex 类型）
+          sed -i 's/^static struct mutex \*ksu_selinux_status_lock/struct mutex *ksu_selinux_status_lock/' "$HIDE_FILE"
+          if ! grep -q '^struct mutex \*ksu_selinux_status_lock' "$HIDE_FILE"; then
+            echo "" >> "$HIDE_FILE"
+            echo "struct mutex *ksu_selinux_status_lock = NULL;" >> "$HIDE_FILE"
+          fi
+          if ! grep -q 'EXPORT_SYMBOL(ksu_selinux_status_lock);' "$HIDE_FILE"; then
+            echo "EXPORT_SYMBOL(ksu_selinux_status_lock);" >> "$HIDE_FILE"
+          fi
+          echo "✅ ksu_selinux_status_lock 已强制全局并导出"
+
+          # 3. 强制 selinux_hide.o 参与编译（向上逐层查找 Makefile）
+          echo "=== 定位包含 selinux_hide 的 Makefile ==="
+          SEARCH_DIR="$HIDE_DIR"
+          SELINUX_MK=""
+          while [ "$SEARCH_DIR" != "." ] && [ "$SEARCH_DIR" != "/" ]; do
+            if [ -f "$SEARCH_DIR/Makefile" ]; then
+              SELINUX_MK="$SEARCH_DIR/Makefile"
+              break
+            fi
+            SEARCH_DIR=$(dirname "$SEARCH_DIR")
+          done
+          if [ -z "$SELINUX_MK" ]; then
+            echo "::error::从 $HIDE_DIR 向上未找到任何 Makefile"
+            exit 1
+          fi
+          echo "✅ 使用 Makefile: $SELINUX_MK"
+
+          MK_DIR=$(dirname "$SELINUX_MK")
+          HIDE_REL=$(realpath --relative-to="$MK_DIR" "$HIDE_FILE")
+          HIDE_OBJ="${HIDE_REL%.c}.o"
+          echo "   编译对象相对路径: $HIDE_OBJ"
+          sed -i "\\|$HIDE_OBJ|d" "$SELINUX_MK"
+          printf '%s\n' "obj-y += $HIDE_OBJ" >> "$SELINUX_MK"
+          echo "✅ 已强制 obj-y += $HIDE_OBJ"
+
+          # 4. 最终验证
+          echo "=== 最终验证 ==="
+          if grep -q '^struct selinux_state fake_state;' "$HIDE_FILE" && \
+             grep -q 'EXPORT_SYMBOL(fake_state);' "$HIDE_FILE" && \
+             grep -q '^struct mutex \*ksu_selinux_status_lock' "$HIDE_FILE" && \
+             grep -q 'EXPORT_SYMBOL(ksu_selinux_status_lock);' "$HIDE_FILE" && \
+             grep -q "obj-y += $HIDE_OBJ" "$SELINUX_MK"; then
+            echo "✅ 所有修复已就位"
+          else
+            echo "::error::修复不完整，请检查日志"
+            exit 1
           fi
 
       - name: Manual integrate BakaSU into Kernel
