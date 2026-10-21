@@ -87,7 +87,7 @@ jobs:
           rm clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz
           ${{ env.CLANG_DIR }}/bin/clang --version
 
-      - name: Clone BakaSU and apply non-GKI SELinux fixes
+      - name: Clone BakaSU
         run: |
           cd ${{ env.KERNEL_DIR }}
           BAKASU_REF="${{ github.event.inputs.bakasu_ref || '896e898' }}"
@@ -98,8 +98,8 @@ jobs:
           git checkout "$BAKASU_REF"
           echo "当前 HEAD: $(git log --oneline -1)"
 
-          # ---------- SUSFS 阻断注释 ----------
-          echo "=== 处理 susfs_compat.mk ==="
+          # 仅处理 SUSFS 兼容性阻断，不再修改 selinux_hide.c
+          echo "=== 处理 susfs_compat.mk 阻断 ==="
           MAP=$(find . -name 'susfs_compat.mk' -type f 2>/dev/null)
           if [ -n "$MAP" ]; then
             while IFS= read -r f; do
@@ -109,106 +109,6 @@ jobs:
             echo "✅ susfs_compat.mk 已处理"
           else
             echo "ℹ️ 未找到 susfs_compat.mk"
-          fi
-
-          # ---------- 动态定位 selinux_hide.c ----------
-          echo "=== 动态定位 selinux_hide.c ==="
-          HIDE_FILE=$(find . -name 'selinux_hide.c' -type f | head -n1)
-          if [ -z "$HIDE_FILE" ]; then
-            echo "::error::在整个仓库中未找到 selinux_hide.c"
-            exit 1
-          fi
-          HIDE_DIR=$(dirname "$HIDE_FILE")
-          echo "✅ 找到 selinux_hide.c: $HIDE_FILE"
-
-          # ---------- 清理错误包含与错误定义 ----------
-          echo "=== 清理之前错误添加的内容 ==="
-          sed -i '/#include <linux\/selinux.h>/d' "$HIDE_FILE"
-          sed -i '/DEFINE_SPINLOCK(ksu_selinux_status_lock);/d' "$HIDE_FILE"
-          sed -i '/EXPORT_SYMBOL(ksu_selinux_status_lock);/d' "$HIDE_FILE"
-          sed -i '/EXPORT_SYMBOL(fake_state);/d' "$HIDE_FILE"
-          echo "✅ 已清理"
-
-          # ---------- 处理 ksu_selinux_status_lock：保持原类型，去掉 static ----------
-          echo "=== 处理 ksu_selinux_status_lock ==="
-          if grep -q 'static struct mutex \*ksu_selinux_status_lock' "$HIDE_FILE"; then
-            sed -i 's/^static struct mutex \*ksu_selinux_status_lock/struct mutex *ksu_selinux_status_lock/' "$HIDE_FILE"
-            echo "✅ 已将 static struct mutex * 改为全局"
-          elif ! grep -q 'ksu_selinux_status_lock' "$HIDE_FILE"; then
-            echo "" >> "$HIDE_FILE"
-            echo "struct mutex *ksu_selinux_status_lock = NULL;" >> "$HIDE_FILE"
-            echo "✅ 已追加 struct mutex * 定义"
-          else
-            echo "ℹ️ 已存在非 static 定义"
-          fi
-          if ! grep -q 'EXPORT_SYMBOL(ksu_selinux_status_lock);' "$HIDE_FILE"; then
-            echo "EXPORT_SYMBOL(ksu_selinux_status_lock);" >> "$HIDE_FILE"
-          fi
-
-          # ---------- 处理 fake_state：保持原类型，去掉 static ----------
-          echo "=== 处理 fake_state ==="
-          if grep -q 'static struct selinux_state fake_state;' "$HIDE_FILE"; then
-            sed -i 's/^static struct selinux_state fake_state;/struct selinux_state fake_state;/' "$HIDE_FILE"
-            echo "✅ 已将 static fake_state 改为全局"
-          elif ! grep -q 'struct selinux_state fake_state;' "$HIDE_FILE"; then
-            echo "" >> "$HIDE_FILE"
-            echo "struct selinux_state fake_state;" >> "$HIDE_FILE"
-            echo "✅ 已追加 fake_state 定义"
-          else
-            echo "ℹ️ 已存在非 static 定义"
-          fi
-          if ! grep -q 'EXPORT_SYMBOL(fake_state);' "$HIDE_FILE"; then
-            echo "EXPORT_SYMBOL(fake_state);" >> "$HIDE_FILE"
-          fi
-
-          # ---------- 向上逐层查找存在的 Makefile ----------
-          echo "=== 定位包含 selinux_hide 的 Makefile ==="
-          SEARCH_DIR="$HIDE_DIR"
-          SELINUX_MK=""
-          while [ "$SEARCH_DIR" != "." ] && [ "$SEARCH_DIR" != "/" ]; do
-            if [ -f "$SEARCH_DIR/Makefile" ]; then
-              SELINUX_MK="$SEARCH_DIR/Makefile"
-              break
-            fi
-            SEARCH_DIR=$(dirname "$SEARCH_DIR")
-          done
-          if [ -z "$SELINUX_MK" ]; then
-            echo "::error::从 $HIDE_DIR 向上未找到任何 Makefile"
-            exit 1
-          fi
-          echo "✅ 使用 Makefile: $SELINUX_MK"
-
-          MK_DIR=$(dirname "$SELINUX_MK")
-          HIDE_REL=$(realpath --relative-to="$MK_DIR" "$HIDE_FILE")
-          HIDE_OBJ="${HIDE_REL%.c}.o"
-          echo "   编译对象相对路径: $HIDE_OBJ"
-
-          # ---------- 注入兼容检测与编译规则 ----------
-          echo "=== 注入 SELinux 兼容检测与编译规则 ==="
-          sed -i "\\|$HIDE_OBJ|d" "$SELINUX_MK"
-          printf '%s\n' \
-            '' \
-            '# === BakaSU non-GKI compatibility: detect selinux_state ===' \
-            'ifeq ($(shell grep -q "struct selinux_state " $(srctree)/security/selinux/include/security.h; echo $$?),0)' \
-            'ccflags-y += -DKSU_COMPAT_HAS_SELINUX_STATE' \
-            'endif' \
-            '' \
-            "obj-y += $HIDE_OBJ" \
-            >> "$SELINUX_MK"
-          echo "✅ 已注入到 $SELINUX_MK"
-
-          # ---------- 最终验证 ----------
-          echo "=== 最终验证 ==="
-          if grep -q '^struct selinux_state fake_state;' "$HIDE_FILE" && \
-             grep -q 'EXPORT_SYMBOL(fake_state);' "$HIDE_FILE" && \
-             grep -q '^struct mutex \*ksu_selinux_status_lock' "$HIDE_FILE" && \
-             grep -q 'EXPORT_SYMBOL(ksu_selinux_status_lock);' "$HIDE_FILE" && \
-             grep -q 'KSU_COMPAT_HAS_SELINUX_STATE' "$SELINUX_MK" && \
-             grep -q "obj-y += $HIDE_OBJ" "$SELINUX_MK"; then
-            echo "✅ 所有修复已就位"
-          else
-            echo "::error::修复不完整，请检查日志"
-            exit 1
           fi
 
       - name: Manual integrate BakaSU into Kernel
@@ -289,22 +189,25 @@ jobs:
             exit 1
           fi
 
-          echo "=== 启用 BakaSU 配置 ==="
+          echo "=== 启用 BakaSU 配置（稳定性优先） ==="
           scripts/config --file ${{ env.OUTPUT_DIR }}/.config \
             --enable KSU \
             --enable KSU_MANUAL_HOOK \
             --disable KSU_TRACEPOINT_HOOK \
+            --enable KSU_COMPAT_HAS_SELINUX_STATE \
+            --enable KSU_COMPAT_HAS_KVMALLOC \
+            --disable KSU_SELINUX_HIDE \
             --enable KSU_SUSFS \
             --enable KSU_SUSFS_SUS_PATH \
             --enable KSU_SUSFS_SUS_MOUNT \
             --enable KSU_SUSFS_SUS_KSTAT \
-            --enable KSU_SUSFS_SPOOF_UNAME \
-            --enable KSU_SUSFS_OPEN_REDIRECT \
-            --enable KSU_SUSFS_SUS_MAP \
             --enable KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
             --disable KSU_SUSFS_ENABLE_LOG \
-            --enable KSU_SUSFS_SUS_SU \
-            --enable KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            --disable KSU_SUSFS_SPOOF_UNAME \
+            --disable KSU_SUSFS_OPEN_REDIRECT \
+            --disable KSU_SUSFS_SUS_MAP \
+            --disable KSU_SUSFS_SUS_SU \
+            --disable KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
             --disable HEADERS_INSTALL \
             --set-val FRAME_WARN 131072 \
             --set-str LOCALVERSION "-edwin-star-260927-qgqi"
@@ -316,7 +219,7 @@ jobs:
             echo "::error::CONFIG_KSU 未启用"
             exit 1
           fi
-          echo "✅ 配置检查通过"
+          echo "✅ 配置检查通过（KSU_SELINUX_HIDE 已禁用，兼容宏已启用）"
 
       - name: Build Kernel
         working-directory: kernel
@@ -366,7 +269,7 @@ jobs:
           printf '%s\n' \
             '#!/sbin/sh' \
             "properties() { '" \
-            'kernel.string=5.4.302-edwin-star-260927-qgqi+ BakaSU for Xiaomi 11 Ultra' \
+            'kernel.string=5.4.302-edwin-star-260927-qgqi+ BakaSU (stable) for Xiaomi 11 Ultra' \
             'do.devicecheck=1' \
             'do.modules=0' \
             'do.systemless=0' \
@@ -393,16 +296,16 @@ jobs:
           
           chmod +x "$AK3_DIR/anykernel.sh"
           cd $AK3_DIR
-          zip -r9 "../${{ env.DEVICE_CODENAME }}-BakaSU-${TIME}.zip" ./*
-          sha256sum "../${{ env.DEVICE_CODENAME }}-BakaSU-${TIME}.zip" > "../SHA256SUMS.txt"
+          zip -r9 "../${{ env.DEVICE_CODENAME }}-BakaSU-stable-${TIME}.zip" ./*
+          sha256sum "../${{ env.DEVICE_CODENAME }}-BakaSU-stable-${TIME}.zip" > "../SHA256SUMS.txt"
           cat ../SHA256SUMS.txt
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kernel_bakasu
+          name: kernel_bakasu_stable
           path: |
-            ${{ env.DEVICE_CODENAME }}-BakaSU-*.zip
+            ${{ env.DEVICE_CODENAME }}-BakaSU-stable-*.zip
             SHA256SUMS.txt
 
       - name: Upload build.log on failure
@@ -417,18 +320,21 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: bakasu_${{ github.run_number }}
-          name: "BakaSU Kernel (LLVM 17.0.6)"
+          tag_name: bakasu_stable_${{ github.run_number }}
+          name: "BakaSU Kernel (Stable, SELinux Hide Disabled)"
           body: |
-            ## 测试内核 - BakaSU 集成版
+            ## BakaSU 内核 - 稳定性优先版本
             - 内核版本：5.4.302
             - 编译工具链：Clang 17.0.6 + LLD 17.0.6
             - LOCALVERSION：`-edwin-star-260927-qgqi`
             - BakaSU commit：${{ env.BAKASU_COMMIT }}
             - BakaSU 版本：${{ env.BAKASU_VERSION }}
+            - **重要：`KSU_SELINUX_HIDE` 已禁用，以避免在 5.4 非 GKI 内核上运行检测 App 时重启。**
+            - 已启用 `KSU_COMPAT_HAS_SELINUX_STATE` 和 `KSU_COMPAT_HAS_KVMALLOC` 兼容选项。
+            - SUSFS 核心功能（路径/挂载/kstat 隐藏）保留，高风险子功能已关闭。
             - 刷机有风险，请备份原 boot 分区
           files: |
-            ${{ env.DEVICE_CODENAME }}-BakaSU-*.zip
+            ${{ env.DEVICE_CODENAME }}-BakaSU-stable-*.zip
             SHA256SUMS.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
