@@ -60,7 +60,7 @@ jobs:
           rm clang+llvm-17.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz
           ${{ env.CLANG_DIR }}/bin/clang --version
 
-      - name: Integrate BakaSU into Kernel (curl method)
+      - name: Manual integrate BakaSU into Kernel
         working-directory: kernel
         run: |
           set -e
@@ -76,115 +76,104 @@ jobs:
           if [ ! -f "include/linux/seccomp_types.h" ]; then
             touch "include/linux/seccomp_types.h"
             echo "✅ 已创建空的 seccomp_types.h"
-          else
-            echo "ℹ️ seccomp_types.h 已存在，跳过"
           fi
 
-          echo "=== 删除内核源码中自带的旧版 KernelSU/ReSukiSU 目录 ==="
+          echo "=== 清理旧版 KernelSU 目录 ==="
           rm -rf KernelSU
           rm -rf drivers/kernelsu
           rm -rf drivers/KernelSU
           echo "✅ 旧版目录已清理干净"
 
-          echo "=== 使用 curl 方式集成 BakaSU ==="
-          curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash
+          echo "=== 手动克隆 BakaSU ==="
+          git clone --depth=1 https://github.com/Baka-SU/BakaSU.git BakaSU_src
 
-          echo "=== 检查集成结果 ==="
-          if [ -d "drivers/kernelsu" ]; then
-            echo "✅ drivers/kernelsu 目录已存在"
-            echo "软链接指向：$(readlink -f drivers/kernelsu)"
-          else
-            echo "::error::集成失败，drivers/kernelsu 目录不存在"
-            exit 1
+          echo "=== 手动建立软链接与构建配置 ==="
+          ln -sf ../BakaSU_src/kernel drivers/kernelsu
+          echo "✅ 软链接: $(readlink -f drivers/kernelsu)"
+
+          if ! grep -q "kernelsu" drivers/Makefile; then
+            printf "\nobj-\$(CONFIG_KSU) += kernelsu/\n" >> drivers/Makefile
+          fi
+
+          if ! grep -q 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig; then
+            sed -i '/^endmenu/i\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
           fi
 
           # ============================================================
-          # 终极修复：动态搜索符号并注入（不再依赖特定文件名）
+          # 终极修复：在源码头部精准注入全局符号定义
           # ============================================================
-          echo "=== 动态搜索 SELinux 符号并注入强导出 ==="
+          echo "=== 搜索并注入全局符号 ==="
           
           KSU_SRC_DIR=$(readlink -f drivers/kernelsu)
+          HIDE_FILE=$(find "$KSU_SRC_DIR" -name 'selinux_hide.c' | head -n1)
           
-          # 1. 在源码目录中搜索引用了 fake_state 的 C 文件
-          TARGET_FILES=$(grep -rlE "fake_state|ksu_selinux_status_lock" "$KSU_SRC_DIR" --include="*.c" 2>/dev/null || true)
+          if [ -z "$HIDE_FILE" ]; then
+            echo "::error::找不到 selinux_hide.c"
+            exit 1
+          fi
+          echo "找到文件: $HIDE_FILE"
           
-          if [ -z "$TARGET_FILES" ]; then
-            echo "::warning::在 $KSU_SRC_DIR 中没有找到引用，可能原生已修复。"
-          else
-            echo "找到以下文件包含相关符号："
-            echo "$TARGET_FILES"
-            
-            # 2. 取出第一个匹配的文件进行修复
-            FIX_FILE=$(echo "$TARGET_FILES" | head -n1)
-            echo "将修复代码注入到：$FIX_FILE"
-            
-            # 确保引入必要头文件
-            if ! grep -q "#include <linux/export.h>" "$FIX_FILE"; then
-              sed -i '1i #include <linux/export.h>' "$FIX_FILE"
-            fi
-            if ! grep -q "#include <linux/mutex.h>" "$FIX_FILE"; then
-              sed -i '1i #include <linux/mutex.h>' "$FIX_FILE"
-            fi
-            
-            # 移除原有的 static 定义，防止重复定义冲突
-            sed -i '/static struct selinux_state fake_state/d' "$FIX_FILE"
-            sed -i '/static struct mutex \*ksu_selinux_status_lock/d' "$FIX_FILE"
-            
-            # 强制追加全局定义（应对 ThinLTO，改用 printf 避免 heredoc 缩进问题）
-            printf '%s\n' \
-              "" \
-              "/* === BakaSU non-GKI ThinLTO 链接修复 (由 CI 自动注入) === */" \
-              "struct selinux_state fake_state;" \
-              "EXPORT_SYMBOL(fake_state);" \
-              "" \
-              "struct mutex *ksu_selinux_status_lock = NULL;" \
-              "EXPORT_SYMBOL(ksu_selinux_status_lock);" \
-              >> "$FIX_FILE"
-            echo "✅ 已在 $FIX_FILE 末尾注入强符号定义和 EXPORT_SYMBOL"
-            
-            # 3. 查找该文件对应的 Makefile 并强制编译
-            FIX_DIR=$(dirname "$FIX_FILE")
-            FIX_MK=""
-            SEARCH_DIR="$FIX_DIR"
-            
-            # 向上逐层查找 Makefile，直到根目录
-            while [ "$SEARCH_DIR" != "." ] && [ "$SEARCH_DIR" != "/" ]; do
+          # 1. 移除文件末尾可能存在的旧注入代码，防止冲突
+          sed -i '/BakaSU non-GKI 修复/,+5d' "$HIDE_FILE"
+          sed -i '/^struct selinux_state fake_state;$/d' "$HIDE_FILE"
+          sed -i '/^struct mutex \*ksu_selinux_status_lock = NULL;$/d' "$HIDE_FILE"
+          sed -i '/^EXPORT_SYMBOL(fake_state);$/d' "$HIDE_FILE"
+          sed -i '/^EXPORT_SYMBOL(ksu_selinux_status_lock);$/d' "$HIDE_FILE"
+          
+          # 2. 查找最后一个 #include 的位置，将全局定义插在它后面
+          LAST_INCLUDE_LINE=$(grep -n '^#include' "$HIDE_FILE" | tail -n1 | cut -d: -f1)
+          if [ -z "$LAST_INCLUDE_LINE" ]; then
+            LAST_INCLUDE_LINE=1
+          fi
+          
+          # 构造要插入的代码（使用 printf 避免 heredoc 问题）
+          # 使用 sed 的 i 命令插入多行
+          sed -i "${LAST_INCLUDE_LINE}r /dev/stdin" "$HIDE_FILE" << 'EOF'
+          
+          /* === BakaSU non-GKI 修复：全局符号定义 === */
+          struct selinux_state fake_state;
+          struct mutex *ksu_selinux_status_lock = NULL;
+          EOF
+          
+          echo "✅ 已在 $HIDE_FILE 头部（第 ${LAST_INCLUDE_LINE} 行之后）注入全局符号定义"
+          
+          # 4. 确保 selinux_hide.o 被编译（如果没在 Makefile 里）
+          HIDE_DIR=$(dirname "$HIDE_FILE")
+          SELINUX_MK="$HIDE_DIR/Makefile"
+          if [ ! -f "$SELINUX_MK" ]; then
+            SEARCH_DIR="$HIDE_DIR"
+            while [ "$SEARCH_DIR" != "." ] && [ "$SEARCH_DIR" != "/" ] && [ "$SEARCH_DIR" != "$KSU_SRC_DIR" ]; do
               if [ -f "$SEARCH_DIR/Makefile" ]; then
-                FIX_MK="$SEARCH_DIR/Makefile"
+                SELINUX_MK="$SEARCH_DIR/Makefile"
                 break
               fi
               SEARCH_DIR=$(dirname "$SEARCH_DIR")
             done
-            
-            if [ -n "$FIX_MK" ]; then
-              MK_DIR=$(dirname "$FIX_MK")
-              FIX_REL=$(realpath --relative-to="$MK_DIR" "$FIX_FILE")
-              FIX_OBJ="${FIX_REL%.c}.o"
-              
-              # 检查 Makefile 中是否已经包含了该 obj（防止重复添加）
-              if ! grep -q "$FIX_OBJ" "$FIX_MK"; then
-                echo "obj-y += $FIX_OBJ" >> "$FIX_MK"
-                echo "✅ 已强制 $FIX_OBJ 编译到 $FIX_MK"
-              else
-                echo "ℹ️ $FIX_OBJ 已在 $FIX_MK 中配置"
-              fi
-            else
-              echo "ℹ️ 在 $FIX_DIR 上层未找到 Makefile，依赖顶层配置编译。"
+          fi
+          
+          if [ -n "$SELINUX_MK" ] && [ -f "$SELINUX_MK" ]; then
+            MK_DIR=$(dirname "$SELINUX_MK")
+            HIDE_REL=$(realpath --relative-to="$MK_DIR" "$HIDE_FILE")
+            HIDE_OBJ="${HIDE_REL%.c}.o"
+            if ! grep -q "$HIDE_OBJ" "$SELINUX_MK"; then
+              echo "obj-y += $HIDE_OBJ" >> "$SELINUX_MK"
+              echo "✅ 已强制 $HIDE_OBJ 编译到 $SELINUX_MK"
             fi
           fi
+          
+          # 验证结果
+          echo "=== 验证注入结果 ==="
+          head -n 30 "$HIDE_FILE" | grep -A 5 "全局符号定义" || echo "⚠️ 未找到注入的代码块"
           # ============================================================
 
-          echo "正在清空 ccache 缓存..."
+          echo "=== 清理 ccache 并修复源码编译警告 ==="
           ccache -C
 
-          echo "正在修复 focaltech_3680 Makefile..."
           FOCALTECH_MAKEFILE="drivers/input/touchscreen/focaltech_3680/Makefile"
           if [ -f "$FOCALTECH_MAKEFILE" ]; then
             sed -i 's/^ \+/\t/' "$FOCALTECH_MAKEFILE"
-            echo "✅ 已修复 focaltech_3680 Makefile 缩进"
           fi
 
-          echo "=== 为子目录追加编译警告屏蔽 ==="
           for entry in \
             "drivers/soc/qcom/Makefile:-Wno-unused-variable" \
             "drivers/thermal/Makefile:-Wno-fortify-source" \
@@ -194,26 +183,22 @@ jobs:
             FLAG="${entry#*:}"
             if [ -f "$MK" ] && ! grep -q -- "$FLAG" "$MK" 2>/dev/null; then
               echo "ccflags-y += $FLAG" >> "$MK"
-              echo "✅ 已为 $MK 追加 $FLAG"
             fi
           done
 
-          echo "正在彻底清理残留文件..."
+          echo "=== 清理残留并生成 .config ==="
           rm -rf ${{ env.OUTPUT_DIR }}
           rm -f .config
           rm -rf include/config include/generated
           make mrproper
 
-          echo "正在生成 out/.config ..."
           make -j$(nproc) O=${{ env.OUTPUT_DIR }} ${{ env.DEFCONFIG_NAME }}
-          
           if [ ! -f "${{ env.OUTPUT_DIR }}/.config" ]; then
-            echo "::error::make defconfig 失败，out/.config 不存在！"
+            echo "::error::make defconfig 失败！"
             exit 1
           fi
-          echo "✅ out/.config 生成成功"
 
-          echo "=== 启用 BakaSU 相关配置，并设置自定义 LOCALVERSION ==="
+          echo "=== 启用 BakaSU 配置 ==="
           scripts/config --file ${{ env.OUTPUT_DIR }}/.config \
             --enable KSU \
             --enable KSU_MANUAL_HOOK \
@@ -235,28 +220,11 @@ jobs:
             --set-val FRAME_WARN 131072 \
             --set-str LOCALVERSION "-edwin-star-260927-qgqi"
 
-          echo "=== 同步配置，避免构建时因 .config 不同步而进入交互模式 ==="
           make O=${{ env.OUTPUT_DIR }} olddefconfig 2>&1 | tee olddefconfig.log
-          echo "✅ 配置已同步"
 
-          echo "=== 检查 KSU 配置是否生效 ==="
-          if grep -q "CONFIG_KSU=y" ${{ env.OUTPUT_DIR }}/.config; then
-            echo "✅ CONFIG_KSU 已启用"
-          else
+          if ! grep -q "CONFIG_KSU=y" ${{ env.OUTPUT_DIR }}/.config; then
             echo "::error::CONFIG_KSU 未启用！"
             exit 1
-          fi
-
-          if grep -q "CONFIG_KSU_MANUAL_HOOK=y" ${{ env.OUTPUT_DIR }}/.config; then
-            echo "✅ CONFIG_KSU_MANUAL_HOOK 已启用"
-          fi
-
-          if grep -q 'CONFIG_LOCALVERSION="-edwin-star-260927-qgqi"' ${{ env.OUTPUT_DIR }}/.config; then
-            echo "✅ LOCALVERSION 已设置为 -edwin-star-260927-qgqi"
-          fi
-
-          if grep -q "CONFIG_FRAME_WARN=131072" ${{ env.OUTPUT_DIR }}/.config; then
-            echo "✅ FRAME_WARN 已放宽至 131072"
           fi
 
       - name: Build Kernel
@@ -271,10 +239,7 @@ jobs:
           export LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- \
                  CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
-          echo "=== 开始编译内核（实时输出，显示所有警告，全速执行） ==="
-          echo "=== 栈帧警告限制已放宽为 131072 ==="
-          echo "=== 并行度 -j$(nproc)（全速） ==="
-
+          echo "=== 开始编译内核 ==="
           make -j$(nproc) O=${{ env.OUTPUT_DIR }} \
                KCFLAGS="-Wno-error -Wframe-larger-than=131072 -Wno-strict-prototypes -Wno-align-mismatch -Wno-unused-function -Wno-compare-distinct-pointer-types -Wno-void-pointer-to-int-cast -Wno-array-parameter -Wno-declaration-after-statement -Wno-sometimes-uninitialized -Wno-unused-variable -Wno-misleading-indentation -Wno-fortify-source -Wno-macro-redefined -Wno-unused-result -Wno-unused-label" \
                HOSTCFLAGS="" \
@@ -306,7 +271,7 @@ jobs:
           gzip -9 -c "$IMG_PATH" > "$AK3_DIR/Image.gz"
           ls -lh "$AK3_DIR/Image.gz"
           
-          # 使用 printf 替代 heredoc 避免 YAML 缩进问题
+          # 使用 printf 替代 heredoc
           printf '%s\n' \
             '#!/sbin/sh' \
             '' \
