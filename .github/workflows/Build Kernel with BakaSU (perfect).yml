@@ -130,16 +130,16 @@ jobs:
             sed -i '/static struct selinux_state fake_state/d' "$FIX_FILE"
             sed -i '/static struct mutex \*ksu_selinux_status_lock/d' "$FIX_FILE"
             
-            # 强制追加全局定义（应对 ThinLTO）
-            cat >> "$FIX_FILE" << 'FIXEOF'
-
-            /* === BakaSU non-GKI ThinLTO 链接修复 (由 CI 自动注入) === */
-            struct selinux_state fake_state;
-            EXPORT_SYMBOL(fake_state);
-
-            struct mutex *ksu_selinux_status_lock = NULL;
-            EXPORT_SYMBOL(ksu_selinux_status_lock);
-            FIXEOF
+            # 强制追加全局定义（应对 ThinLTO，改用 printf 避免 heredoc 缩进问题）
+            printf '%s\n' \
+              "" \
+              "/* === BakaSU non-GKI ThinLTO 链接修复 (由 CI 自动注入) === */" \
+              "struct selinux_state fake_state;" \
+              "EXPORT_SYMBOL(fake_state);" \
+              "" \
+              "struct mutex *ksu_selinux_status_lock = NULL;" \
+              "EXPORT_SYMBOL(ksu_selinux_status_lock);" \
+              >> "$FIX_FILE"
             echo "✅ 已在 $FIX_FILE 末尾注入强符号定义和 EXPORT_SYMBOL"
             
             # 3. 查找该文件对应的 Makefile 并强制编译
@@ -306,42 +306,43 @@ jobs:
           gzip -9 -c "$IMG_PATH" > "$AK3_DIR/Image.gz"
           ls -lh "$AK3_DIR/Image.gz"
           
-          cat > "$AK3_DIR/anykernel.sh" << 'AK3EOF'
-          #!/sbin/sh
-
-          ### AnyKernel3 Flashable Kernel Script
-          ## Adapted for Xiaomi Mi 11 Ultra (star) with BakaSU
-
-          properties() { '
-          kernel.string=5.4.302-edwin-star-260927-qgqi+ BakaSU for Xiaomi 11 Ultra
-          do.devicecheck=1
-          do.modules=0
-          do.systemless=0
-          do.cleanup=1
-          do.cleanuponabort=0
-          device.name1=star
-          device.name2=mars
-          device.name3=
-          device.name4=
-          device.name5=
-          supported.versions=
-          supported.patchlevels=
-          supported.vendorpatchlevels=
-          '; } # end properties
-
-          # boot shell variables
-          BLOCK=boot;
-          IS_SLOT_DEVICE=1;
-          RAMDISK_COMPRESSION=auto;
-          PATCH_VBMETA_FLAG=auto;
-
-          # import functions/variables and setup patching - do not remove
-          . tools/ak3-core.sh;
-
-          # pure kernel swap: keep the existing ramdisk and repack with the new Image.gz
-          split_boot;
-          flash_boot;
-          AK3EOF
+          # 使用 printf 替代 heredoc 避免 YAML 缩进问题
+          printf '%s\n' \
+            '#!/sbin/sh' \
+            '' \
+            '### AnyKernel3 Flashable Kernel Script' \
+            '## Adapted for Xiaomi Mi 11 Ultra (star) with BakaSU' \
+            '' \
+            "properties() { '" \
+            'kernel.string=5.4.302-edwin-star-260927-qgqi+ BakaSU for Xiaomi 11 Ultra' \
+            'do.devicecheck=1' \
+            'do.modules=0' \
+            'do.systemless=0' \
+            'do.cleanup=1' \
+            'do.cleanuponabort=0' \
+            'device.name1=star' \
+            'device.name2=mars' \
+            'device.name3=' \
+            'device.name4=' \
+            'device.name5=' \
+            'supported.versions=' \
+            'supported.patchlevels=' \
+            'supported.vendorpatchlevels=' \
+            "'; } # end properties" \
+            '' \
+            '# boot shell variables' \
+            'BLOCK=boot;' \
+            'IS_SLOT_DEVICE=1;' \
+            'RAMDISK_COMPRESSION=auto;' \
+            'PATCH_VBMETA_FLAG=auto;' \
+            '' \
+            '# import functions/variables and setup patching - do not remove' \
+            '. tools/ak3-core.sh;' \
+            '' \
+            '# pure kernel swap: keep the existing ramdisk and repack with the new Image.gz' \
+            'split_boot;' \
+            'flash_boot;' \
+            > "$AK3_DIR/anykernel.sh"
           
           chmod +x "$AK3_DIR/anykernel.sh"
           echo "=== 生成的 anykernel.sh ==="
