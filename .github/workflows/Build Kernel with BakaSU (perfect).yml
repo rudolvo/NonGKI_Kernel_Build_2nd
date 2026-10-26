@@ -100,7 +100,7 @@ jobs:
           fi
 
           # ============================================================
-          # 终极修复：在源码头部精准注入全局符号定义
+          # 终极修复：清理旧 static 声明，并在头部注入全局定义
           # ============================================================
           echo "=== 搜索并注入全局符号 ==="
           
@@ -113,21 +113,20 @@ jobs:
           fi
           echo "找到文件: $HIDE_FILE"
           
-          # 1. 移除文件末尾可能存在的旧注入代码，防止冲突
-          sed -i '/BakaSU non-GKI 修复/,+5d' "$HIDE_FILE"
-          sed -i '/^struct selinux_state fake_state;$/d' "$HIDE_FILE"
-          sed -i '/^struct mutex \*ksu_selinux_status_lock = NULL;$/d' "$HIDE_FILE"
-          sed -i '/^EXPORT_SYMBOL(fake_state);$/d' "$HIDE_FILE"
-          sed -i '/^EXPORT_SYMBOL(ksu_selinux_status_lock);$/d' "$HIDE_FILE"
+          # 1. 移除之前注入的旧代码（防重复）
+          sed -i '/BakaSU non-GKI 修复/,+3d' "$HIDE_FILE"
           
-          # 2. 查找最后一个 #include 的位置，将全局定义插在它后面
+          # 2. 删除文件里原有的所有 static 声明（无论带不带 NULL 初始化，无论空格怎么打）
+          sed -i '/static struct mutex \*ksu_selinux_status_lock/d' "$HIDE_FILE"
+          sed -i '/static struct selinux_state fake_state/d' "$HIDE_FILE"
+          
+          # 3. 查找最后一个 #include 的位置，将全局定义插在它后面
           LAST_INCLUDE_LINE=$(grep -n '^#include' "$HIDE_FILE" | tail -n1 | cut -d: -f1)
           if [ -z "$LAST_INCLUDE_LINE" ]; then
             LAST_INCLUDE_LINE=1
           fi
           
-          # 构造要插入的代码（使用 printf 避免 heredoc 问题）
-          # 使用 sed 的 i 命令插入多行
+          # 构造插入内容（使用 sed 的 r 命令读取临时输入）
           sed -i "${LAST_INCLUDE_LINE}r /dev/stdin" "$HIDE_FILE" << 'EOF'
           
           /* === BakaSU non-GKI 修复：全局符号定义 === */
@@ -135,9 +134,9 @@ jobs:
           struct mutex *ksu_selinux_status_lock = NULL;
           EOF
           
-          echo "✅ 已在 $HIDE_FILE 头部（第 ${LAST_INCLUDE_LINE} 行之后）注入全局符号定义"
+          echo "✅ 已清理原有 static 声明，并在第 ${LAST_INCLUDE_LINE} 行后注入全局定义"
           
-          # 4. 确保 selinux_hide.o 被编译（如果没在 Makefile 里）
+          # 4. 确保 selinux_hide.o 被编译
           HIDE_DIR=$(dirname "$HIDE_FILE")
           SELINUX_MK="$HIDE_DIR/Makefile"
           if [ ! -f "$SELINUX_MK" ]; then
@@ -161,9 +160,9 @@ jobs:
             fi
           fi
           
-          # 验证结果
+          # 验证：确保文件中只剩下一处定义
           echo "=== 验证注入结果 ==="
-          head -n 30 "$HIDE_FILE" | grep -A 5 "全局符号定义" || echo "⚠️ 未找到注入的代码块"
+          grep -n "ksu_selinux_status_lock" "$HIDE_FILE" | head -n 5
           # ============================================================
 
           echo "=== 清理 ccache 并修复源码编译警告 ==="
