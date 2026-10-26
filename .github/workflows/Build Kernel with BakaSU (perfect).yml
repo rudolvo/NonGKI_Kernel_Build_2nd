@@ -111,7 +111,7 @@ jobs:
             echo "ℹ️ 未找到 susfs_compat.mk"
           fi
 
-          # ---------- 强制导出 SELinux 符号（确保 KSU_SELINUX_HIDE 启用后能链接） ----------
+          # ---------- 强制导出 SELinux 符号（确保 selinux_hide.c 能被链接） ----------
           echo "=== 强制导出 SELinux 符号 ==="
           HIDE_FILE=$(find . -name 'selinux_hide.c' -type f | head -n1)
           if [ -z "$HIDE_FILE" ]; then
@@ -168,7 +168,7 @@ jobs:
           printf '%s\n' "obj-y += $HIDE_OBJ" >> "$SELINUX_MK"
           echo "✅ 已强制 obj-y += $HIDE_OBJ"
 
-          # 4. 最终验证
+          # 4. 最终验证（仅检查符号导出和编译规则，不再检查 CONFIG_KSU_SELINUX_HIDE）
           echo "=== 最终验证 ==="
           if grep -q '^struct selinux_state fake_state;' "$HIDE_FILE" && \
              grep -q 'EXPORT_SYMBOL(fake_state);' "$HIDE_FILE" && \
@@ -241,7 +241,7 @@ jobs:
             "drivers/usb/dwc3/Makefile:-Wno-unused-label"; do
             MK="${entry%:*}"
             FLAG="${entry#*:}"
-            if [ -f "$MK" ] && ! grep -q "$FLAG" "$MK"; then
+            if [ -f "$MK" ] && ! grep -q -- "$FLAG" "$MK" 2>/dev/null; then
               echo "ccflags-y += $FLAG" >> "$MK"
             fi
           done
@@ -259,14 +259,13 @@ jobs:
             exit 1
           fi
 
-          echo "=== 启用 BakaSU 配置（恢复 SELINUX_HIDE） ==="
+          echo "=== 启用 BakaSU 配置（不设置 KSU_SELINUX_HIDE，它是运行时特性） ==="
           scripts/config --file ${{ env.OUTPUT_DIR }}/.config \
             --enable KSU \
             --enable KSU_MANUAL_HOOK \
             --disable KSU_TRACEPOINT_HOOK \
             --enable KSU_COMPAT_HAS_SELINUX_STATE \
             --enable KSU_COMPAT_HAS_KVMALLOC \
-            --enable KSU_SELINUX_HIDE \
             --enable KSU_SUSFS \
             --enable KSU_SUSFS_SUS_PATH \
             --enable KSU_SUSFS_SUS_MOUNT \
@@ -289,11 +288,7 @@ jobs:
             echo "::error::CONFIG_KSU 未启用"
             exit 1
           fi
-          if ! grep -q "CONFIG_KSU_SELINUX_HIDE=y" ${{ env.OUTPUT_DIR }}/.config; then
-            echo "::error::CONFIG_KSU_SELINUX_HIDE 未启用"
-            exit 1
-          fi
-          echo "✅ 配置检查通过（KSU_SELINUX_HIDE 已启用）"
+          echo "✅ 配置检查通过（KSU_SELINUX_HIDE 为运行时特性，无需在 .config 中设置）"
 
       - name: Build Kernel
         working-directory: kernel
@@ -395,15 +390,15 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: bakasu_${{ github.run_number }}
-          name: "BakaSU Kernel (SELinux Hide Enabled)"
+          name: "BakaSU Kernel (SELinux Hide Runtime-Controlled)"
           body: |
-            ## BakaSU 内核 - SELINUX_HIDE 已启用
+            ## BakaSU 内核 - SELinux Hide 由运行时控制
             - 内核版本：5.4.302
             - 编译工具链：Clang 17.0.6 + LLD 17.0.6
             - LOCALVERSION：`-edwin-star-260927-qgqi`
             - BakaSU commit：${{ env.BAKASU_COMMIT }}
             - BakaSU 版本：${{ env.BAKASU_VERSION }}
-            - **注意：`KSU_SELINUX_HIDE` 已启用。此前该功能在 5.4 内核上曾导致运行检测 App 时重启，此版本尚未验证是否解决该问题。**
+            - **注意：`selinux_hide` 是运行时特性，刷入后需在 BakaSU 管理器中手动开启。开启后需重启手机生效。**
             - 刷机有风险，请备份原 boot 分区
           files: |
             ${{ env.DEVICE_CODENAME }}-BakaSU-*.zip
