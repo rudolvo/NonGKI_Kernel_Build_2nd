@@ -28,6 +28,18 @@ jobs:
           path: kernel
           fetch-depth: 1
 
+      - name: Verify Kernel Commit & Clean Workspace
+        working-directory: kernel
+        run: |
+          echo "=== 当前内核源码 Git 信息 ==="
+          echo "分支: ${{ env.KERNEL_BRANCH }}"
+          echo "最新提交: $(git log --oneline -1)"
+          echo "提交哈希: $(git rev-parse HEAD)"
+          echo "=== 强制清理可能存在的旧编译产物 ==="
+          git reset --hard HEAD
+          git clean -fdx
+          echo "✅ 清理完成"
+
       - name: Checkout Workflow Repo (Patches)
         uses: actions/checkout@v4
         with:
@@ -72,6 +84,11 @@ jobs:
           export LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- \
                  CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
+          echo "=== 强制拉取最新版 BakaSU ==="
+          rm -rf BakaSU_src
+          git clone --depth=1 https://github.com/Baka-SU/BakaSU.git BakaSU_src
+          echo "BakaSU HEAD: $(cd BakaSU_src && git log --oneline -1)"
+
           echo "=== 手动创建 seccomp_types.h 以规避 grep 警告 ==="
           if [ ! -f "include/linux/seccomp_types.h" ]; then
             touch "include/linux/seccomp_types.h"
@@ -83,9 +100,6 @@ jobs:
           rm -rf drivers/kernelsu
           rm -rf drivers/KernelSU
           echo "✅ 旧版目录已清理干净"
-
-          echo "=== 手动克隆 BakaSU ==="
-          git clone --depth=1 https://github.com/Baka-SU/BakaSU.git BakaSU_src
 
           echo "=== 手动建立软链接与构建配置 ==="
           ln -sf ../BakaSU_src/kernel drivers/kernelsu
@@ -116,7 +130,7 @@ jobs:
           # 1. 移除之前注入的旧代码（防重复）
           sed -i '/BakaSU non-GKI 修复/,+3d' "$HIDE_FILE"
           
-          # 2. 删除文件里原有的所有 static 声明（无论带不带 NULL 初始化，无论空格怎么打）
+          # 2. 删除文件里原有的所有 static 声明
           sed -i '/static struct mutex \*ksu_selinux_status_lock/d' "$HIDE_FILE"
           sed -i '/static struct selinux_state fake_state/d' "$HIDE_FILE"
           
@@ -126,7 +140,7 @@ jobs:
             LAST_INCLUDE_LINE=1
           fi
           
-          # 构造插入内容（使用 sed 的 r 命令读取临时输入）
+          # 构造插入内容
           sed -i "${LAST_INCLUDE_LINE}r /dev/stdin" "$HIDE_FILE" << 'EOF'
           
           /* === BakaSU non-GKI 修复：全局符号定义 === */
@@ -159,10 +173,6 @@ jobs:
               echo "✅ 已强制 $HIDE_OBJ 编译到 $SELINUX_MK"
             fi
           fi
-          
-          # 验证：确保文件中只剩下一处定义
-          echo "=== 验证注入结果 ==="
-          grep -n "ksu_selinux_status_lock" "$HIDE_FILE" | head -n 5
           # ============================================================
 
           echo "=== 清理 ccache 并修复源码编译警告 ==="
@@ -217,7 +227,7 @@ jobs:
             --enable KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
             --disable HEADERS_INSTALL \
             --set-val FRAME_WARN 131072 \
-            --set-str LOCALVERSION "-edwin-star-260927-qgqi"
+            --set-str LOCALVERSION "-edwin-star-v2-$(date +%m%d)" # 加了 v2 和日期，强制区分版本
 
           make O=${{ env.OUTPUT_DIR }} olddefconfig 2>&1 | tee olddefconfig.log
 
@@ -255,13 +265,16 @@ jobs:
             exit 1
           fi
 
+          echo "=== 编译产物的校验信息 ==="
+          md5sum ${{ env.OUTPUT_DIR }}/arch/arm64/boot/Image
+          strings ${{ env.OUTPUT_DIR }}/arch/arm64/boot/Image | grep "Linux version" | head -n 1
           echo "✅ 编译成功，Image 已生成"
 
       - name: Package AnyKernel3
         id: package
         run: |
           set -e
-          TIME=$(date +"%Y.%m.%d")
+          TIME=$(date +"%Y.%m.%d-%H%M")
           AK3_DIR="AnyKernel3"
           IMG_PATH="${{ env.KERNEL_DIR }}/${{ env.OUTPUT_DIR }}/arch/arm64/boot/Image"
           
@@ -270,7 +283,6 @@ jobs:
           gzip -9 -c "$IMG_PATH" > "$AK3_DIR/Image.gz"
           ls -lh "$AK3_DIR/Image.gz"
           
-          # 使用 printf 替代 heredoc
           printf '%s\n' \
             '#!/sbin/sh' \
             '' \
@@ -278,7 +290,7 @@ jobs:
             '## Adapted for Xiaomi Mi 11 Ultra (star) with BakaSU' \
             '' \
             "properties() { '" \
-            'kernel.string=5.4.302-edwin-star-260927-qgqi+ BakaSU for Xiaomi 11 Ultra' \
+            'kernel.string=5.4.302-edwin-star-v2+ BakaSU for Xiaomi 11 Ultra' \
             'do.devicecheck=1' \
             'do.modules=0' \
             'do.systemless=0' \
@@ -309,8 +321,6 @@ jobs:
             > "$AK3_DIR/anykernel.sh"
           
           chmod +x "$AK3_DIR/anykernel.sh"
-          echo "=== 生成的 anykernel.sh ==="
-          cat "$AK3_DIR/anykernel.sh"
           
           cd $AK3_DIR
           zip -r9 "../${{ env.DEVICE_CODENAME }}-BakaSU-${TIME}.zip" ./*
@@ -341,11 +351,7 @@ jobs:
             ## 测试内核 - BakaSU 集成版
             - 使用 BakaSU main 分支最新版本
             - 启用 KSU_MANUAL_HOOK + SUSFS 全套功能
-            - Backport BPF (Kernel5.10)
-            - 启用 LTO (ThinLTO)
-            - 启用 f2fs 文件系统优化
-            - 支持 HyperOS 4.0 Android 17
-            - 测试 Miui Android 13 及更高正常 
+            - **注意：此版本 LOCALVERSION 已更新为 v2，请以此确认是否刷入成功**
             - 刷机有风险，请备份原内核
           files: ${{ env.DEVICE_CODENAME }}-BakaSU-*.zip
         env:
