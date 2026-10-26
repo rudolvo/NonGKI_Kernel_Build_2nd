@@ -86,7 +86,7 @@ jobs:
           rm -rf drivers/KernelSU
           echo "✅ 旧版目录已清理干净"
 
-                    echo "=== 使用 curl 方式集成 BakaSU ==="
+          echo "=== 使用 curl 方式集成 BakaSU ==="
           curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash
 
           echo "=== 检查集成结果 ==="
@@ -99,66 +99,79 @@ jobs:
           fi
 
           # ============================================================
-          # 在官方集成完成后，手动修复非 GKI 符号链接问题
+          # 终极修复：动态搜索符号并注入（不再依赖特定文件名）
           # ============================================================
-          echo "=== 修复非 GKI SELinux 符号链接问题 ==="
-          HIDE_FILE=$(find drivers/kernelsu -name 'selinux_hide.c' | head -n1)
-          if [ -z "$HIDE_FILE" ]; then
-            echo "::error::在 drivers/kernelsu 中未找到 selinux_hide.c"
-            exit 1
-          fi
-          echo "找到文件: $HIDE_FILE"
+          echo "=== 动态搜索 SELinux 符号并注入强导出 ==="
+          
+          KSU_SRC_DIR=$(readlink -f drivers/kernelsu)
+          
+          # 1. 在源码目录中搜索引用了 fake_state 的 C 文件
+          TARGET_FILES=$(grep -rlE "fake_state|ksu_selinux_status_lock" "$KSU_SRC_DIR" --include="*.c" 2>/dev/null || true)
+          
+          if [ -z "$TARGET_FILES" ]; then
+            echo "::warning::在 $KSU_SRC_DIR 中没有找到引用，可能原生已修复。"
+          else
+            echo "找到以下文件包含相关符号："
+            echo "$TARGET_FILES"
+            
+            # 2. 取出第一个匹配的文件进行修复
+            FIX_FILE=$(echo "$TARGET_FILES" | head -n1)
+            echo "将修复代码注入到：$FIX_FILE"
+            
+            # 确保引入必要头文件
+            if ! grep -q "#include <linux/export.h>" "$FIX_FILE"; then
+              sed -i '1i #include <linux/export.h>' "$FIX_FILE"
+            fi
+            if ! grep -q "#include <linux/mutex.h>" "$FIX_FILE"; then
+              sed -i '1i #include <linux/mutex.h>' "$FIX_FILE"
+            fi
+            
+            # 移除原有的 static 定义，防止重复定义冲突
+            sed -i '/static struct selinux_state fake_state/d' "$FIX_FILE"
+            sed -i '/static struct mutex \*ksu_selinux_status_lock/d' "$FIX_FILE"
+            
+            # 强制追加全局定义（应对 ThinLTO）
+            cat >> "$FIX_FILE" << 'FIXEOF'
 
-          # 修复 fake_state
-          sed -i '/^static struct selinux_state fake_state;/d' "$HIDE_FILE"
-          if ! grep -q '^struct selinux_state fake_state;' "$HIDE_FILE"; then
-            echo "" >> "$HIDE_FILE"
-            echo "struct selinux_state fake_state;" >> "$HIDE_FILE"
-          fi
-          if ! grep -q 'EXPORT_SYMBOL(fake_state);' "$HIDE_FILE"; then
-            echo "EXPORT_SYMBOL(fake_state);" >> "$HIDE_FILE"
-          fi
-          echo "✅ fake_state 已处理"
+            /* === BakaSU non-GKI ThinLTO 链接修复 (由 CI 自动注入) === */
+            struct selinux_state fake_state;
+            EXPORT_SYMBOL(fake_state);
 
-          # 修复 ksu_selinux_status_lock
-          sed -i 's/^static struct mutex \*ksu_selinux_status_lock/struct mutex *ksu_selinux_status_lock/' "$HIDE_FILE"
-          if ! grep -q '^struct mutex \*ksu_selinux_status_lock' "$HIDE_FILE"; then
-            echo "" >> "$HIDE_FILE"
-            echo "struct mutex *ksu_selinux_status_lock = NULL;" >> "$HIDE_FILE"
-          fi
-          if ! grep -q 'EXPORT_SYMBOL(ksu_selinux_status_lock);' "$HIDE_FILE"; then
-            echo "EXPORT_SYMBOL(ksu_selinux_status_lock);" >> "$HIDE_FILE"
-          fi
-          echo "✅ ksu_selinux_status_lock 已处理"
-
-          # 确保 selinux_hide.o 被编译进内核
-          HIDE_DIR=$(dirname "$HIDE_FILE")
-          SELINUX_MK="$HIDE_DIR/Makefile"
-          if [ ! -f "$SELINUX_MK" ]; then
-            # 如果 feature 目录没有 Makefile，向上找
-            SEARCH_DIR="$HIDE_DIR"
-            while [ "$SEARCH_DIR" != "drivers/kernelsu" ] && [ -n "$SEARCH_DIR" ]; do
+            struct mutex *ksu_selinux_status_lock = NULL;
+            EXPORT_SYMBOL(ksu_selinux_status_lock);
+            FIXEOF
+            echo "✅ 已在 $FIX_FILE 末尾注入强符号定义和 EXPORT_SYMBOL"
+            
+            # 3. 查找该文件对应的 Makefile 并强制编译
+            FIX_DIR=$(dirname "$FIX_FILE")
+            FIX_MK=""
+            SEARCH_DIR="$FIX_DIR"
+            
+            # 向上逐层查找 Makefile，直到根目录
+            while [ "$SEARCH_DIR" != "." ] && [ "$SEARCH_DIR" != "/" ]; do
               if [ -f "$SEARCH_DIR/Makefile" ]; then
-                SELINUX_MK="$SEARCH_DIR/Makefile"
+                FIX_MK="$SEARCH_DIR/Makefile"
                 break
               fi
               SEARCH_DIR=$(dirname "$SEARCH_DIR")
             done
+            
+            if [ -n "$FIX_MK" ]; then
+              MK_DIR=$(dirname "$FIX_MK")
+              FIX_REL=$(realpath --relative-to="$MK_DIR" "$FIX_FILE")
+              FIX_OBJ="${FIX_REL%.c}.o"
+              
+              # 检查 Makefile 中是否已经包含了该 obj（防止重复添加）
+              if ! grep -q "$FIX_OBJ" "$FIX_MK"; then
+                echo "obj-y += $FIX_OBJ" >> "$FIX_MK"
+                echo "✅ 已强制 $FIX_OBJ 编译到 $FIX_MK"
+              else
+                echo "ℹ️ $FIX_OBJ 已在 $FIX_MK 中配置"
+              fi
+            else
+              echo "ℹ️ 在 $FIX_DIR 上层未找到 Makefile，依赖顶层配置编译。"
+            fi
           fi
-          
-          if [ -z "$SELINUX_MK" ] || [ ! -f "$SELINUX_MK" ]; then
-            echo "::error::无法定位包含 selinux_hide 的 Makefile"
-            exit 1
-          fi
-          echo "使用 Makefile: $SELINUX_MK"
-          
-          MK_DIR=$(dirname "$SELINUX_MK")
-          HIDE_REL=$(realpath --relative-to="$MK_DIR" "$HIDE_FILE")
-          HIDE_OBJ="${HIDE_REL%.c}.o"
-          
-          sed -i "\\|$HIDE_OBJ|d" "$SELINUX_MK"
-          printf '%s\n' "obj-y += $HIDE_OBJ" >> "$SELINUX_MK"
-          echo "✅ 已强制 obj-y += $HIDE_OBJ 到 $SELINUX_MK"
           # ============================================================
 
           echo "正在清空 ccache 缓存..."
@@ -171,57 +184,19 @@ jobs:
             echo "✅ 已修复 focaltech_3680 Makefile 缩进"
           fi
 
-          echo "=== 为 msm_minidump 子目录追加 -Wno-unused-variable ==="
-          MINIDUMP_MAKEFILE="drivers/soc/qcom/Makefile"
-          if [ -f "$MINIDUMP_MAKEFILE" ]; then
-            if ! grep -q "Wno-unused-variable" "$MINIDUMP_MAKEFILE"; then
-              echo "ccflags-y += -Wno-unused-variable" >> "$MINIDUMP_MAKEFILE"
-              echo "✅ 已为 drivers/soc/qcom Makefile 追加 -Wno-unused-variable"
-            else
-              echo "ℹ️ drivers/soc/qcom Makefile 已包含该选项，跳过"
+          echo "=== 为子目录追加编译警告屏蔽 ==="
+          for entry in \
+            "drivers/soc/qcom/Makefile:-Wno-unused-variable" \
+            "drivers/thermal/Makefile:-Wno-fortify-source" \
+            "techpack/bootinfo/Makefile:-Wno-unused-result" \
+            "drivers/usb/dwc3/Makefile:-Wno-unused-label"; do
+            MK="${entry%:*}"
+            FLAG="${entry#*:}"
+            if [ -f "$MK" ] && ! grep -q -- "$FLAG" "$MK" 2>/dev/null; then
+              echo "ccflags-y += $FLAG" >> "$MK"
+              echo "✅ 已为 $MK 追加 $FLAG"
             fi
-          else
-            echo "ℹ️ 未找到 drivers/soc/qcom/Makefile，跳过"
-          fi
-
-          echo "=== 为 thermal 子目录追加 -Wno-fortify-source ==="
-          THERMAL_MAKEFILE="drivers/thermal/Makefile"
-          if [ -f "$THERMAL_MAKEFILE" ]; then
-            if ! grep -q "Wno-fortify-source" "$THERMAL_MAKEFILE"; then
-              echo "ccflags-y += -Wno-fortify-source" >> "$THERMAL_MAKEFILE"
-              echo "✅ 已为 drivers/thermal Makefile 追加 -Wno-fortify-source"
-            else
-              echo "ℹ️ drivers/thermal Makefile 已包含该选项，跳过"
-            fi
-          else
-            echo "ℹ️ 未找到 drivers/thermal/Makefile，跳过"
-          fi
-
-          echo "=== 为 bootinfo 子目录追加 -Wno-unused-result ==="
-          BOOTINFO_MAKEFILE="techpack/bootinfo/Makefile"
-          if [ -f "$BOOTINFO_MAKEFILE" ]; then
-            if ! grep -q "Wno-unused-result" "$BOOTINFO_MAKEFILE"; then
-              echo "ccflags-y += -Wno-unused-result" >> "$BOOTINFO_MAKEFILE"
-              echo "✅ 已为 techpack/bootinfo Makefile 追加 -Wno-unused-result"
-            else
-              echo "ℹ️ techpack/bootinfo Makefile 已包含该选项，跳过"
-            fi
-          else
-            echo "ℹ️ 未找到 techpack/bootinfo/Makefile，跳过"
-          fi
-
-          echo "=== 为 dwc3 子目录追加 -Wno-unused-label ==="
-          DWC3_MAKEFILE="drivers/usb/dwc3/Makefile"
-          if [ -f "$DWC3_MAKEFILE" ]; then
-            if ! grep -q "Wno-unused-label" "$DWC3_MAKEFILE"; then
-              echo "ccflags-y += -Wno-unused-label" >> "$DWC3_MAKEFILE"
-              echo "✅ 已为 drivers/usb/dwc3 Makefile 追加 -Wno-unused-label"
-            else
-              echo "ℹ️ drivers/usb/dwc3 Makefile 已包含该选项，跳过"
-            fi
-          else
-            echo "ℹ️ 未找到 drivers/usb/dwc3/Makefile，跳过"
-          fi
+          done
 
           echo "正在彻底清理残留文件..."
           rm -rf ${{ env.OUTPUT_DIR }}
@@ -243,6 +218,8 @@ jobs:
             --enable KSU \
             --enable KSU_MANUAL_HOOK \
             --disable KSU_TRACEPOINT_HOOK \
+            --enable KSU_COMPAT_HAS_SELINUX_STATE \
+            --enable KSU_COMPAT_HAS_KVMALLOC \
             --enable KSU_SUSFS \
             --enable KSU_SUSFS_SUS_PATH \
             --enable KSU_SUSFS_SUS_MOUNT \
@@ -316,9 +293,6 @@ jobs:
 
           echo "✅ 编译成功，Image 已生成"
 
-      # ============================================================
-      # 4. 打包 AnyKernel3
-      # ============================================================
       - name: Package AnyKernel3
         id: package
         run: |
@@ -378,9 +352,6 @@ jobs:
           cd ..
           echo "zip_name=${{ env.DEVICE_CODENAME }}-BakaSU-${TIME}.zip" >> $GITHUB_OUTPUT
 
-      # ============================================================
-      # 5. 上传
-      # ============================================================
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
