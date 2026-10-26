@@ -86,7 +86,7 @@ jobs:
           rm -rf drivers/KernelSU
           echo "✅ 旧版目录已清理干净"
 
-          echo "=== 使用 curl 方式集成 BakaSU ==="
+                    echo "=== 使用 curl 方式集成 BakaSU ==="
           curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash
 
           echo "=== 检查集成结果 ==="
@@ -98,24 +98,68 @@ jobs:
             exit 1
           fi
 
-          echo "=== 修复 ksu_selinux_status_lock 未定义问题（在集成后执行） ==="
-          KSU_SELINUX_FILE="drivers/kernelsu/selinux/selinux.c"
-          if [ -f "$KSU_SELINUX_FILE" ]; then
-            if ! grep -q "DEFINE_SPINLOCK(ksu_selinux_status_lock)" "$KSU_SELINUX_FILE"; then
-              echo "DEFINE_SPINLOCK(ksu_selinux_status_lock);" >> "$KSU_SELINUX_FILE"
-              echo "✅ 已添加 ksu_selinux_status_lock 定义"
-            else
-              echo "ℹ️ ksu_selinux_status_lock 已存在，跳过"
-            fi
-          else
-            echo "⚠️ 未找到 $KSU_SELINUX_FILE，尝试查找其他位置"
-            find drivers/kernelsu -name "*.c" -exec grep -l "ksu_selinux_status_lock" {} \; | while read f; do
-              if ! grep -q "DEFINE_SPINLOCK(ksu_selinux_status_lock)" "$f"; then
-                echo "DEFINE_SPINLOCK(ksu_selinux_status_lock);" >> "$f"
-                echo "✅ 已在 $f 中添加定义"
+          # ============================================================
+          # 在官方集成完成后，手动修复非 GKI 符号链接问题
+          # ============================================================
+          echo "=== 修复非 GKI SELinux 符号链接问题 ==="
+          HIDE_FILE=$(find drivers/kernelsu -name 'selinux_hide.c' | head -n1)
+          if [ -z "$HIDE_FILE" ]; then
+            echo "::error::在 drivers/kernelsu 中未找到 selinux_hide.c"
+            exit 1
+          fi
+          echo "找到文件: $HIDE_FILE"
+
+          # 修复 fake_state
+          sed -i '/^static struct selinux_state fake_state;/d' "$HIDE_FILE"
+          if ! grep -q '^struct selinux_state fake_state;' "$HIDE_FILE"; then
+            echo "" >> "$HIDE_FILE"
+            echo "struct selinux_state fake_state;" >> "$HIDE_FILE"
+          fi
+          if ! grep -q 'EXPORT_SYMBOL(fake_state);' "$HIDE_FILE"; then
+            echo "EXPORT_SYMBOL(fake_state);" >> "$HIDE_FILE"
+          fi
+          echo "✅ fake_state 已处理"
+
+          # 修复 ksu_selinux_status_lock
+          sed -i 's/^static struct mutex \*ksu_selinux_status_lock/struct mutex *ksu_selinux_status_lock/' "$HIDE_FILE"
+          if ! grep -q '^struct mutex \*ksu_selinux_status_lock' "$HIDE_FILE"; then
+            echo "" >> "$HIDE_FILE"
+            echo "struct mutex *ksu_selinux_status_lock = NULL;" >> "$HIDE_FILE"
+          fi
+          if ! grep -q 'EXPORT_SYMBOL(ksu_selinux_status_lock);' "$HIDE_FILE"; then
+            echo "EXPORT_SYMBOL(ksu_selinux_status_lock);" >> "$HIDE_FILE"
+          fi
+          echo "✅ ksu_selinux_status_lock 已处理"
+
+          # 确保 selinux_hide.o 被编译进内核
+          HIDE_DIR=$(dirname "$HIDE_FILE")
+          SELINUX_MK="$HIDE_DIR/Makefile"
+          if [ ! -f "$SELINUX_MK" ]; then
+            # 如果 feature 目录没有 Makefile，向上找
+            SEARCH_DIR="$HIDE_DIR"
+            while [ "$SEARCH_DIR" != "drivers/kernelsu" ] && [ -n "$SEARCH_DIR" ]; do
+              if [ -f "$SEARCH_DIR/Makefile" ]; then
+                SELINUX_MK="$SEARCH_DIR/Makefile"
+                break
               fi
+              SEARCH_DIR=$(dirname "$SEARCH_DIR")
             done
           fi
+          
+          if [ -z "$SELINUX_MK" ] || [ ! -f "$SELINUX_MK" ]; then
+            echo "::error::无法定位包含 selinux_hide 的 Makefile"
+            exit 1
+          fi
+          echo "使用 Makefile: $SELINUX_MK"
+          
+          MK_DIR=$(dirname "$SELINUX_MK")
+          HIDE_REL=$(realpath --relative-to="$MK_DIR" "$HIDE_FILE")
+          HIDE_OBJ="${HIDE_REL%.c}.o"
+          
+          sed -i "\\|$HIDE_OBJ|d" "$SELINUX_MK"
+          printf '%s\n' "obj-y += $HIDE_OBJ" >> "$SELINUX_MK"
+          echo "✅ 已强制 obj-y += $HIDE_OBJ 到 $SELINUX_MK"
+          # ============================================================
 
           echo "正在清空 ccache 缓存..."
           ccache -C
