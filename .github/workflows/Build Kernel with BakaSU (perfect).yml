@@ -7,7 +7,7 @@ env:
   TZ: Asia/Shanghai
   DEVICE_CODENAME: "vili"
   KERNEL_ARCH: "arm64"
-  KERNEL_REPO: "https://github.com/Santhanabalan/android_kernel_xiaomi_sm8350.git"
+  KERNEL_REPO: "Santhanabalan/android_kernel_xiaomi_sm8350"
   KERNEL_BRANCH: "main"
   DEFCONFIG_NAME: "vili_defconfig"
   OUTPUT_DIR: "out"
