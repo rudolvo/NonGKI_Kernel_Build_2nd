@@ -5,11 +5,11 @@ on:
 
 env:
   TZ: Asia/Shanghai
-  DEVICE_CODENAME: "star"
+  DEVICE_CODENAME: "vili"
   KERNEL_ARCH: "arm64"
-  KERNEL_REPO: "zttlove/android_kernel_xiaomi_sm8350-hyperos"
-  KERNEL_BRANCH: "dynamic"
-  DEFCONFIG_NAME: "vendor/star_defconfig"
+  KERNEL_REPO: "rudolvo/kernel_xiaomi_sm8350"
+  KERNEL_BRANCH: "hyper-os"
+  DEFCONFIG_NAME: "kangaroox-vili_defconfig"
   OUTPUT_DIR: "out"
   CLANG_DIR: "${{ github.workspace }}/clang"
   CCACHE_DIR: "${{ github.workspace }}/.ccache"
@@ -290,14 +290,14 @@ jobs:
             '## Adapted for Xiaomi Mi 11 Ultra (star) with BakaSU' \
             '' \
             "properties() { '" \
-            'kernel.string=5.4.302-edwin-star-v2+ BakaSU for Xiaomi 11 Ultra' \
+            'kernel.string=5.4.302-NabrakTihang BakaSU for Xiaomi 11 Ultra' \
             'do.devicecheck=1' \
             'do.modules=0' \
             'do.systemless=0' \
             'do.cleanup=1' \
             'do.cleanuponabort=0' \
-            'device.name1=star' \
-            'device.name2=mars' \
+            'device.name1=vili' \
+            'device.name2=' \
             'device.name3=' \
             'device.name4=' \
             'device.name5=' \
