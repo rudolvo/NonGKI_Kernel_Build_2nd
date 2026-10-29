@@ -1,4 +1,4 @@
-name: Build Xiaomi11U (hyper A16)
+name: Build Xiaomi11tpro
 
 on:
   workflow_call:
@@ -6,14 +6,14 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  DEVICE_NAME: "xiaomi_11U"
-  DEVICE_CODENAME: "star"
+  DEVICE_NAME: "xiaomi_11tpro"
+  DEVICE_CODENAME: "vili"
 
   CUSTOM_CMDS: "CLANG_TRIPLE=aarch64-linux-gnu-"
   EXTRA_CMDS: "LD=ld.lld LLVM=1 LLVM_IAS=1"
   KCFLAGS_EXTRA: "-Wframe-larger-than=4096 -Wno-strict-prototypes -Wno-align-mismatch -Wno-unused-function -Wno-compare-distinct-pointer-types -Wno-void-pointer-to-int-cast -Wno-array-parameter -Wno-declaration-after-statement -fno-stack-protector -Wno-sometimes-uninitialized"
 
-  KERNEL_SOURCE: "https://github.com/MiYume0721/android_kernel_xiaomi_sm8350_miyume.git"
+  KERNEL_SOURCE: "https://github.com/rudolvo/miyume.git"
   KERNEL_BRANCH: "main"
   KERNEL_VERSION: "5.4"
   KERNEL_ARCH: "arm64"
@@ -28,7 +28,7 @@ env:
   GCC_32_BRANCH: "android12L-release"
 
   DEFCONFIG_SOURCE: ""
-  DEFCONFIG_NAME: "star_defconfig"
+  DEFCONFIG_NAME: "1"
   DEFCONFIG_ORIGIN_IMAGE: ""
   DEFCONFIG_FROM_BOOT: false
 
@@ -80,12 +80,12 @@ env:
   BUILD_DEBUGGER: "false"
   SKIP_PATCH: "true"
   BUILD_OTHER_CONFIG: "false"
-  MERGE_CONFIG_FILES: "vendor/venus_QGKI.config,vendor/xiaomi_QGKI.config"
+  MERGE_CONFIG_FILES: "vendor/vili_QGKI.config,vendor/xiaomi_QGKI.config"
   FREE_MORE_SPACE: "false"
 
 jobs:
   build-kernel:
-    name: Xiaomi11U (hyper A16)
+    name: Xiaomi11
     runs-on: ubuntu-latest
     env:
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
@@ -173,8 +173,8 @@ jobs:
         if: env.PACK_METHOD == 'AnyKernel3'
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: Star-HyperA16-Kernel-${{ github.run_number }}
-          name: Xiaomi 11 Ultra Star HyperOS A16 NonGKI Kernel
+          tag_name: vili-Hyper-Kernel-${{ github.run_number }}
+          name: Xiaomi NonGKI Kernel
           body: |
             ## Xiaomi 11 Ultra Star HyperOS A16
             - ReSukiSU + SuSFS 2.1（源码自带）
