@@ -12,8 +12,8 @@ env:
   CUSTOM_CMDS : "CLANG_TRIPLE=aarch64-linux-gnu-"
   EXTRA_CMDS : "LD=ld.lld LLVM=1 LLVM_IAS=1"
 
-  KERNEL_SOURCE : "https://github.com/AOSP-for-vili/android_kernel_xiaomi_sm8350.git"
-  KERNEL_BRANCH : "lineage-23.2"
+  KERNEL_SOURCE : "https://github.com/Santhanabalan/android_kernel_xiaomi_sm8350.git"
+  KERNEL_BRANCH : "ack-5.4.302"
 
   CLANG_SOURCE : "https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git"
   CLANG_BRANCH : "lineage-20.0"
@@ -25,7 +25,7 @@ env:
   GCC_32_BRANCH : "android12L-release"
 
   DEFCONFIG_SOURCE: ""
-  DEFCONFIG_NAME : "vendor/lahaina-qgki_defconfig"
+  DEFCONFIG_NAME : "kangaroox-vili_defconfig"
   DEFCONFIG_ORIGIN_IMAGE: ""
   DEFCONFIG_FROM_BOOT: false
 
@@ -38,8 +38,8 @@ env:
   SUSFS_ENABLE : true
   SUSFS_FIXED : false
 
-  AK3_SOURCE : "https://github.com/osm0sis/AnyKernel3.git"
-  AK3_BRANCH : "master"
+  AK3_SOURCE : "https://github.com/Santhanabalan/AnyKernel3.git"
+  AK3_BRANCH : "KangarooX"
 
   BOOT_SOURCE : ""
 
